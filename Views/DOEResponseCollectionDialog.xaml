@@ -1,0 +1,58 @@
+<Window x:Class="MaxChemical.Modules.DOE.Views.DOEResponseCollectionDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="输入实验结果" 
+        Width="500" Height="Auto" SizeToContent="Height"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        Background="#F5F5F5">
+
+    <Border Margin="0" Padding="24" Background="White" CornerRadius="0">
+        <StackPanel>
+            <!-- 标题 -->
+            <TextBlock Text="实验结果录入" FontSize="18" FontWeight="SemiBold" Foreground="#1B4F72" Margin="0,0,0,4"/>
+            <TextBlock x:Name="SubtitleText" FontSize="13" Foreground="#888" Margin="0,0,0,16" TextWrapping="Wrap"/>
+
+            <!-- 当前因子值展示 -->
+            <Border Background="#F8F9FA" CornerRadius="6" Padding="12" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Text="本组实验参数" FontWeight="SemiBold" FontSize="13" Foreground="#555" Margin="0,0,0,8"/>
+                    <ItemsControl x:Name="FactorDisplay">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal" Margin="0,2">
+                                    <TextBlock Text="{Binding Key}" Width="120" FontWeight="SemiBold" Foreground="#444"/>
+                                    <TextBlock Text="{Binding Value}" Foreground="#2E75B6"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <!-- 响应值输入 -->
+            <TextBlock Text="请输入实验结果" FontWeight="SemiBold" FontSize="14" Margin="0,0,0,8"/>
+            <ItemsControl x:Name="ResponseInputs">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Orientation="Horizontal" Margin="0,4">
+                            <TextBlock Text="{Binding Name}" Width="140" VerticalAlignment="Center" FontSize="13"/>
+                            <TextBox x:Name="ValueBox" Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}" 
+                                     Width="150" Padding="6,4" FontSize="13"
+                                     BorderBrush="#CCC" BorderThickness="1"/>
+                            <TextBlock Text="{Binding Unit}" VerticalAlignment="Center" Margin="8,0,0,0" Foreground="#888" FontSize="12"/>
+                        </StackPanel>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- 按钮 -->
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+                <Button Content="跳过本组" Click="Skip_Click" Padding="16,8" Margin="0,0,8,0"
+                        Background="#F0F0F0" BorderBrush="#CCC" BorderThickness="1"/>
+                <Button Content="提交结果" Click="Submit_Click" Padding="16,8"
+                        Background="#2E75B6" Foreground="White" FontWeight="SemiBold" BorderThickness="0"/>
+            </StackPanel>
+        </StackPanel>
+    </Border>
+</Window>

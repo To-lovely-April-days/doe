@@ -1,0 +1,120 @@
+﻿<Window x:Class="MaxChemical.Modules.DOE.Views.DOEBatchEditDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="编辑 DOE 方案" Width="680" Height="520"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        Background="#F2F4F7">
+    <Window.Resources>
+        <ResourceDictionary Source="DOEStyles.xaml"/>
+    </Window.Resources>
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 标题 -->
+        <StackPanel Margin="0,0,0,16">
+            <TextBlock Text="编辑因子参数" FontSize="16" FontWeight="SemiBold" Foreground="#1A1F36"/>
+            <TextBlock FontSize="11" Foreground="#8A8F9C" Margin="0,4,0,0">
+                <Run Text="批次: "/>
+                <Run Text="{Binding BatchName, Mode=OneWay}" FontWeight="Medium" Foreground="#4A5066"/>
+                <Run Text="  ·  修改上下界或水平数后，实验矩阵将自动重新生成"/>
+            </TextBlock>
+        </StackPanel>
+
+        <!-- 因子编辑表格 -->
+        <Border Grid.Row="1" Background="White" CornerRadius="8" BorderBrush="#ECEEF2" BorderThickness="1">
+            <DataGrid ItemsSource="{Binding EditableFactors}" AutoGenerateColumns="False"
+                      CanUserAddRows="False" CanUserDeleteRows="False"
+                      GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#F2F3F5"
+                      BorderThickness="0" Background="White" RowBackground="White"
+                      HeadersVisibility="Column" FontSize="12" RowHeight="42" ColumnHeaderHeight="38">
+                <DataGrid.ColumnHeaderStyle>
+                    <Style TargetType="DataGridColumnHeader">
+                        <Setter Property="Background" Value="#FAFBFC"/>
+                        <Setter Property="Foreground" Value="#8A8F9C"/>
+                        <Setter Property="FontSize" Value="11"/>
+                        <Setter Property="FontWeight" Value="SemiBold"/>
+                        <Setter Property="Padding" Value="12,0"/>
+                        <Setter Property="BorderBrush" Value="#E8EAED"/>
+                        <Setter Property="BorderThickness" Value="0,0,0,1"/>
+                    </Style>
+                </DataGrid.ColumnHeaderStyle>
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="因子名称" Binding="{Binding FactorName}" Width="*" IsReadOnly="True">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                <Setter Property="Foreground" Value="#1A1F36"/>
+                                <Setter Property="VerticalAlignment" Value="Center"/>
+                                <Setter Property="Padding" Value="12,0"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Header="下界" Binding="{Binding LowerBound, UpdateSourceTrigger=PropertyChanged}" Width="100">
+                        <DataGridTextColumn.EditingElementStyle>
+                            <Style TargetType="TextBox">
+                                <Setter Property="Padding" Value="4,2"/>
+                            </Style>
+                        </DataGridTextColumn.EditingElementStyle>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Header="上界" Binding="{Binding UpperBound, UpdateSourceTrigger=PropertyChanged}" Width="100">
+                        <DataGridTextColumn.EditingElementStyle>
+                            <Style TargetType="TextBox">
+                                <Setter Property="Padding" Value="4,2"/>
+                            </Style>
+                        </DataGridTextColumn.EditingElementStyle>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Header="水平数" Binding="{Binding LevelCount, UpdateSourceTrigger=PropertyChanged}" Width="70">
+                        <DataGridTextColumn.EditingElementStyle>
+                            <Style TargetType="TextBox">
+                                <Setter Property="Padding" Value="4,2"/>
+                            </Style>
+                        </DataGridTextColumn.EditingElementStyle>
+                    </DataGridTextColumn>
+                    <DataGridTextColumn Header="步长" Binding="{Binding StepSize, StringFormat=F2}" Width="80" IsReadOnly="True">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Foreground" Value="#A0A4B0"/>
+                                <Setter Property="FontFamily" Value="Consolas"/>
+                                <Setter Property="VerticalAlignment" Value="Center"/>
+                                <Setter Property="Padding" Value="12,0"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
+                    </DataGridTextColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Border>
+
+        <!-- 预览信息 -->
+        <Border Grid.Row="2" Background="#FAFBFC" CornerRadius="6" Padding="14,10" Margin="0,12,0,0">
+            <TextBlock FontSize="11" Foreground="#4A5066">
+                <Run Text="设计方法: "/>
+                <Run Text="{Binding DesignMethod, Mode=OneWay}" FontWeight="Medium"/>
+                <Run Text="  ·  修改后预计: "/>
+                <Run Text="{Binding EstimatedRunCount, Mode=OneWay}" FontWeight="Medium" Foreground="#0078D4"/>
+                <Run Text=" 组实验"/>
+            </TextBlock>
+        </Border>
+
+        <!-- 按钮 -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="取消" Padding="20,8" Click="Cancel_Click" Margin="0,0,8,0">
+                <Button.Template>
+                    <ControlTemplate TargetType="Button">
+                        <Border CornerRadius="6" Padding="{TemplateBinding Padding}"
+                                Background="White" BorderBrush="#D0D0D0" BorderThickness="1" Cursor="Hand">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Button.Template>
+            </Button>
+            <Button Content="保存修改并重新生成矩阵" Style="{StaticResource DOEPrimaryBtn}" Padding="20,8"
+                    Click="Save_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

@@ -1,0 +1,736 @@
+﻿<UserControl x:Class="MaxChemical.Modules.DOE.Views.DOEModelAnalysisView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:oxy="http://oxyplot.org/wpf"
+             xmlns:converters="clr-namespace:MaxChemical.Modules.DOE.Converters"
+           
+             Background="#F2F4F7">
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="DOEStyles.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+            <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+            <converters:BoolToOlsBackgroundConverter x:Key="BoolToBackground"/>
+            <converters:InverseBoolToVisibilityConverter x:Key="InverseBoolToVis"/>
+        </ResourceDictionary>
+    </UserControl.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- ═══ 0. 顶部 GPR / OLS 大 Tab ═══ -->
+        <Border Grid.Row="0" Background="White" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" Padding="18,10,18,0">
+            <StackPanel Orientation="Horizontal">
+                <Border Padding="16,8" CornerRadius="8,8,0,0" Cursor="Hand" Margin="0,0,2,0"
+                        Background="{Binding GprTabBackground}" MouseLeftButtonDown="GprTab_Click">
+                    <TextBlock Text="GPR 代理模型" FontSize="13" FontWeight="SemiBold" Foreground="{Binding GprTabForeground}"/>
+                </Border>
+                <Border Padding="16,8" CornerRadius="8,8,0,0" Cursor="Hand"
+                        Background="{Binding OlsTabBackground}" MouseLeftButtonDown="OlsTab_Click">
+                    <TextBlock Text="OLS 回归分析" FontSize="13" FontWeight="SemiBold" Foreground="{Binding OlsTabForeground}"/>
+                </Border>
+            </StackPanel>
+        </Border>
+
+        <!-- ═══ GPR Tab 内容 ═══ -->
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
+                      Visibility="{Binding IsGprTabSelected, Converter={StaticResource BoolToVis}}">
+            <StackPanel Margin="18">
+
+                <!-- 1. 模型选择 + 操作按钮 + 指标条 -->
+                <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,0,0,12">
+                    <StackPanel>
+                        <Border Padding="10,10,10,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1">
+                            <Grid>
+                                <ItemsControl ItemsSource="{Binding Models}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <WrapPanel Orientation="Horizontal"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Margin="0,0,6,4" Padding="6,4,10,4" CornerRadius="6" Cursor="Hand" BorderThickness="1" Background="{Binding TabBackground}" BorderBrush="{Binding TabBorderBrush}" MouseLeftButtonDown="ModelTab_Click">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Ellipse Width="6" Height="6" Fill="{Binding StatusDotColor}" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                                    <TextBlock Text="{Binding ModelName}" FontSize="11" Foreground="{Binding TabForeground}" FontWeight="{Binding TabFontWeight}"/>
+                                                    <TextBlock Text="{Binding ShortInfo}" FontSize="10" Foreground="#999" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top">
+                                    <Button Content="重新训练" Style="{StaticResource DOEPrimaryBtn}" Padding="10,4" Height="26" FontSize="10" Command="{Binding RetrainCommand}" Margin="0,0,4,0"/>
+                                    <Button Padding="10,4" Height="26" FontSize="10" Cursor="Hand" Margin="0,0,4,0" Command="{Binding DownloadTemplateCommand}">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border x:Name="Bd" CornerRadius="6" Padding="{TemplateBinding Padding}" Background="White" BorderBrush="#D0D0D0" BorderThickness="1">
+                                                    <TextBlock Text="下载模板" FontSize="10" FontWeight="SemiBold" Foreground="#4A5066" HorizontalAlignment="Center"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="Bd" Property="Background" Value="#F7F8FA"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+                                    <Button Padding="10,4" Height="26" FontSize="10" Cursor="Hand" Margin="0,0,4,0" Command="{Binding ImportDataCommand}">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border x:Name="Bd" CornerRadius="6" Padding="{TemplateBinding Padding}" Background="White" BorderBrush="#0078D4" BorderThickness="1">
+                                                    <TextBlock Text="导入数据" FontSize="10" FontWeight="SemiBold" Foreground="#0078D4" HorizontalAlignment="Center"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="Bd" Property="Background" Value="#EBF3FE"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+                                    <Button Content="刷新" Style="{StaticResource DOEOutlineBtn}" Padding="10,4" Height="26" FontSize="10" Command="{Binding RefreshAllCommand}" Margin="0,0,4,0"/>
+                                    <Button Content="删除" Style="{StaticResource DOEDangerBtn}" Padding="10,4" Height="26" FontSize="10" Command="{Binding DeleteModelCommand}"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                        <!-- 指标条 -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="180"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" HorizontalAlignment="Center" Margin="0,12,0,12">
+                                <TextBlock Text="状态" FontSize="10" Foreground="#8A8F9C" HorizontalAlignment="Center"/>
+                                <TextBlock Text="{Binding SelectedModel.StatusText}" FontSize="15" FontWeight="SemiBold" Foreground="{Binding SelectedModel.StatusColor}" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                                <TextBlock FontSize="10" Foreground="#AAA" HorizontalAlignment="Center"><Run Text="{Binding SelectedModel.DataCountText, Mode=OneWay}"/><Run Text=" 组数据"/></TextBlock>
+                            </StackPanel>
+                            <Border Grid.Column="1" Width="1" Background="#ECEEF2" VerticalAlignment="Center" Height="36"/>
+                            <StackPanel Grid.Column="2" HorizontalAlignment="Center" Margin="0,12,0,12">
+                                <TextBlock Text="R²" FontSize="10" Foreground="#8A8F9C" HorizontalAlignment="Center"/>
+                                <TextBlock Text="{Binding SelectedModel.RSquaredText}" FontSize="18" FontWeight="SemiBold" Foreground="#0078D4" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                            </StackPanel>
+                            <Border Grid.Column="3" Width="1" Background="#ECEEF2" VerticalAlignment="Center" Height="36"/>
+                            <StackPanel Grid.Column="4" HorizontalAlignment="Center" Margin="0,12,0,12">
+                                <TextBlock Text="RMSE" FontSize="10" Foreground="#8A8F9C" HorizontalAlignment="Center"/>
+                                <TextBlock Text="{Binding SelectedModel.RMSEText}" FontSize="18" FontWeight="SemiBold" Foreground="#1A1F36" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                            </StackPanel>
+                            <Border Grid.Column="5" Width="1" Background="#ECEEF2" VerticalAlignment="Center" Height="36"/>
+                            <StackPanel Grid.Column="6" HorizontalAlignment="Center" Margin="0,12,0,12">
+                                <TextBlock Text="上次训练" FontSize="10" Foreground="#8A8F9C" HorizontalAlignment="Center"/>
+                                <TextBlock Text="{Binding SelectedModel.LastTrainedText}" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                                <TextBlock Text="Const × RBF + White" FontSize="10" Foreground="#AAA" HorizontalAlignment="Center"/>
+                            </StackPanel>
+                            <Border Grid.Column="7" Width="1" Background="#ECEEF2" VerticalAlignment="Center" Height="36"/>
+                            <StackPanel Grid.Column="8" HorizontalAlignment="Center" Margin="0,12,0,12">
+                                <TextBlock Text="因子签名" FontSize="10" Foreground="#8A8F9C" HorizontalAlignment="Center"/>
+                                <TextBlock Text="{Binding SelectedModel.FactorSignature}" FontSize="11" FontFamily="Consolas" Foreground="#0078D4" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <!-- 2. 训练数据集 -->
+                <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,0,0,12">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                            <Grid>
+                                <TextBlock Text="训练数据集" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                                <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="11" Foreground="#A0A4B0"><Run Text="共 "/><Run Text="{Binding TotalDataCount, Mode=OneWay}"/><Run Text=" 条数据"/></TextBlock>
+                            </Grid>
+                        </Border>
+                        <DataGrid Grid.Row="1" ItemsSource="{Binding PagedTrainingData}" AutoGenerateColumns="True" CanUserAddRows="False" IsReadOnly="True" GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#F2F3F5" BorderThickness="0" Background="White" RowBackground="White" AlternatingRowBackground="#FAFBFC" HeadersVisibility="Column" SelectionMode="Single" FontSize="11" FontFamily="Segoe UI" RowHeight="34" ColumnHeaderHeight="32" AutoGeneratingColumn="TrainingData_AutoGeneratingColumn">
+                            <DataGrid.ColumnHeaderStyle>
+                                <Style TargetType="DataGridColumnHeader">
+                                    <Setter Property="Background" Value="#FAFBFC"/>
+                                    <Setter Property="Foreground" Value="#8A8F9C"/>
+                                    <Setter Property="FontSize" Value="10"/>
+                                    <Setter Property="FontWeight" Value="SemiBold"/>
+                                    <Setter Property="Padding" Value="10,0"/>
+                                    <Setter Property="BorderBrush" Value="#E8EAED"/>
+                                    <Setter Property="BorderThickness" Value="0,0,0,1"/>
+                                    <Setter Property="HorizontalContentAlignment" Value="Center"/>
+                                </Style>
+                            </DataGrid.ColumnHeaderStyle>
+                            <DataGrid.CellStyle>
+                                <Style TargetType="DataGridCell">
+                                    <Setter Property="Padding" Value="8,0"/>
+                                    <Setter Property="BorderThickness" Value="0"/>
+                                    <Setter Property="Foreground" Value="#1A1F36"/>
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="DataGridCell">
+                                                <Border Padding="{TemplateBinding Padding}" Background="{TemplateBinding Background}">
+                                                    <ContentPresenter VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                                                </Border>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                    <Style.Triggers>
+                                        <Trigger Property="IsSelected" Value="True">
+                                            <Setter Property="Background" Value="#EBF3FE"/>
+                                            <Setter Property="Foreground" Value="#1A1F36"/>
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </DataGrid.CellStyle>
+                        </DataGrid>
+                        <Border Grid.Row="2" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,1,0,0">
+                            <Grid>
+                                <TextBlock VerticalAlignment="Center" FontSize="11" Foreground="#A0A4B0"><Run Text="第 "/><Run Text="{Binding CurrentPage, Mode=OneWay}"/><Run Text=" / "/><Run Text="{Binding TotalPages, Mode=OneWay}"/><Run Text=" 页，每页 10 条"/></TextBlock>
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                    <Button Content="◀" Command="{Binding PrevPageCommand}" Width="28" Height="28" FontSize="10" Cursor="Hand" Margin="0,0,4,0">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border x:Name="Bd" CornerRadius="6" Background="White" BorderBrush="#D8DCE3" BorderThickness="1">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="Bd" Property="Background" Value="#F2F4F7"/>
+                                                    </Trigger>
+                                                    <Trigger Property="IsEnabled" Value="False">
+                                                        <Setter TargetName="Bd" Property="Opacity" Value="0.35"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+                                    <Button Content="▶" Command="{Binding NextPageCommand}" Width="28" Height="28" FontSize="10" Cursor="Hand">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border x:Name="Bd" CornerRadius="6" Background="White" BorderBrush="#D8DCE3" BorderThickness="1">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="Bd" Property="Background" Value="#F2F4F7"/>
+                                                    </Trigger>
+                                                    <Trigger Property="IsEnabled" Value="False">
+                                                        <Setter TargetName="Bd" Property="Opacity" Value="0.35"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </Grid>
+                </Border>
+
+                <!-- 3. 图表 2x2 -->
+                <UniformGrid Columns="2" Margin="0,0,0,12">
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,0,5,5">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="240"/>
+                            </Grid.RowDefinitions>
+                            <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <TextBlock Text="模型演进 R² vs 数据量" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                            </Border>
+                            <oxy:PlotView Grid.Row="1" Model="{Binding EvolutionPlot}" Background="White" Margin="8"/>
+                        </Grid>
+                    </Border>
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="5,0,0,5">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="240"/>
+                            </Grid.RowDefinitions>
+                            <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <TextBlock Text="参数敏感性（GPR Lengthscale）" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                            </Border>
+                            <oxy:PlotView Grid.Row="1" Model="{Binding SensitivityPlot}" Background="White" Margin="8"/>
+                        </Grid>
+                    </Border>
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,5,5,0">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="240"/>
+                            </Grid.RowDefinitions>
+                            <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <TextBlock Text="实际值 vs GPR 预测值" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                            </Border>
+                            <oxy:PlotView Grid.Row="1" Model="{Binding ActualVsPredictedPlot}" Background="White" Margin="8"/>
+                        </Grid>
+                    </Border>
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="5,5,0,0">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="240"/>
+                            </Grid.RowDefinitions>
+                            <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <TextBlock Text="残差 vs GPR 拟合值" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                            </Border>
+                            <oxy:PlotView Grid.Row="1" Model="{Binding ResidualPlot}" Background="White" Margin="8"/>
+                        </Grid>
+                    </Border>
+                </UniformGrid>
+
+
+
+                <!-- 5. 响应曲面 -->
+                <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="320"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                            <Grid>
+                                <TextBlock Text="GPR 响应曲面" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36" VerticalAlignment="Center"/>
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                    <ComboBox ItemsSource="{Binding FactorNames}" SelectedItem="{Binding SurfaceFactor1}" Width="110" FontSize="11" Padding="4,3" Margin="0,0,4,0" Style="{StaticResource FieldComboStyle}"/>
+                                    <TextBlock Text="×" VerticalAlignment="Center" Foreground="#8A8F9C" FontSize="11" Margin="0,0,4,0"/>
+                                    <ComboBox ItemsSource="{Binding FactorNames}" SelectedItem="{Binding SurfaceFactor2}" Width="110" FontSize="11" Padding="4,3" Margin="0,0,8,0" Style="{StaticResource FieldComboStyle}"/>
+                                    <Button Content="生成" Style="{StaticResource DOEPrimaryBtn}" Padding="14,5" Command="{Binding GenerateSurfaceCommand}" Height="26"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                        <Grid Grid.Row="1">
+                            <Image Source="{Binding SurfaceImage}" Stretch="Uniform" Margin="10">
+                                <Image.Style>
+                                    <Style TargetType="Image">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SurfaceImage}" Value="{x:Null}">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Image.Style>
+                            </Image>
+                            <oxy:PlotView Model="{Binding SurfacePlot}" Background="White" Margin="8">
+                                <oxy:PlotView.Style>
+                                    <Style TargetType="oxy:PlotView">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SurfaceImage}" Value="{x:Null}">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </oxy:PlotView.Style>
+                            </oxy:PlotView>
+                        </Grid>
+                        <Border Grid.Row="2" Background="#FAFBFC" Padding="12,9" BorderBrush="#E8EAED" BorderThickness="0,1,0,0" CornerRadius="0,0,10,10" Visibility="{Binding HasOptimalResult, Converter={StaticResource BoolToVis}}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,16,0">
+                                    <Ellipse Width="6" Height="6" Fill="#4CAF50" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="最优预测" FontSize="11" FontWeight="SemiBold" Foreground="#1A1F36" VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <ItemsControl Grid.Column="1" ItemsSource="{Binding OptimalFactors}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,14,0" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Key}" FontSize="11" Foreground="#8A8F9C" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                                                <TextBlock Text="{Binding Value, StringFormat={}{0:F2}}" FontSize="12" FontWeight="SemiBold" FontFamily="Consolas" Foreground="#1A1F36" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <Border Grid.Column="2" Background="#E8F5E9" CornerRadius="6" Padding="12,4">
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock Text="响应 " FontSize="11" Foreground="#388E3C" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding OptimalResponseText}" FontSize="16" FontWeight="SemiBold" Foreground="#2E7D32" FontFamily="Consolas" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding OptimalConfidenceText}" FontSize="10" Foreground="#66BB6A" VerticalAlignment="Center" Margin="6,0,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
+                        </Border>
+                    </Grid>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- ═══ OLS Tab 内容 ═══ -->
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
+                      Visibility="{Binding IsOlsTabSelected, Converter={StaticResource BoolToVis}}">
+            <StackPanel Margin="18">
+
+                <!-- OLS 批次选择 -->
+                <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,0,0,12">
+                    <StackPanel>
+                        <Border Background="#EBF3FE" Padding="14,10" BorderBrush="#C2D9F5" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                            <Grid>
+                                <TextBlock Text="选择实验批次进行 OLS 回归分析" FontSize="12" FontWeight="SemiBold" Foreground="#1565C0" VerticalAlignment="Center"/>
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                    <TextBlock Text="分析响应:" VerticalAlignment="Center" FontSize="11" Foreground="#7F8C8D" Margin="0,0,6,0"/>
+                                    <ComboBox ItemsSource="{Binding ResponseNames}" SelectedItem="{Binding SelectedResponseName}" Width="120" FontSize="11"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                        <ItemsControl ItemsSource="{Binding OlsBatchItems}" Margin="8">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Margin="4" Padding="12,10" CornerRadius="8" Cursor="Hand" BorderThickness="1.5"
+                                            MouseLeftButtonDown="OlsBatchItem_Click">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Setter Property="Background" Value="White"/>
+                                                <Setter Property="BorderBrush" Value="#ECEEF2"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                                        <Setter Property="Background" Value="#EBF3FE"/>
+                                                        <Setter Property="BorderBrush" Value="#0078D4"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="{Binding BatchName}" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36" VerticalAlignment="Center"/>
+                                            <Border Grid.Column="2" Background="#E8F5E9" CornerRadius="4" Padding="6,2" Margin="8,0">
+                                                <TextBlock Text="{Binding DesignMethod}" FontSize="10" Foreground="#2E7D32"/>
+                                            </Border>
+                                            <TextBlock Grid.Column="3" FontSize="11" Foreground="#8A8F9C" VerticalAlignment="Center">
+                                                <Run Text="{Binding CompletedCount, Mode=OneWay}"/>
+                                                <Run Text=" 组数据 · "/>
+                                                <Run Text="{Binding FactorCount, Mode=OneWay}"/>
+                                                <Run Text=" 因子"/>
+                                            </TextBlock>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock Text="{Binding OlsStatusText}" FontSize="11" Foreground="#5A7CA8" Margin="14,4,14,12" TextWrapping="Wrap"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- OLS 结果面板（选择批次后显示） -->
+                <StackPanel Visibility="{Binding HasOlsResult, Converter={StaticResource BoolToVis}}">
+                    <!-- 模型摘要 -->
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Padding="16" Margin="0,0,0,12">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="R²" FontSize="11" Foreground="#7F8C8D"/>
+                                <TextBlock Text="{Binding OlsResult.ModelSummary.RSquared, StringFormat={}{0:F4}}" FontSize="18" FontWeight="SemiBold" Foreground="#2E86C1"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="R²adj" FontSize="11" Foreground="#7F8C8D"/>
+                                <TextBlock Text="{Binding OlsResult.ModelSummary.RSquaredAdj, StringFormat={}{0:F4}}" FontSize="18" FontWeight="SemiBold" Foreground="#27AE60"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="R²pred" FontSize="11" Foreground="#7F8C8D"/>
+                                <TextBlock Text="{Binding OlsResult.ModelSummary.RSquaredPred, StringFormat={}{0:F4}}" FontSize="18" FontWeight="SemiBold" Foreground="#8E44AD"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="3">
+                                <TextBlock Text="RMSE" FontSize="11" Foreground="#7F8C8D"/>
+                                <TextBlock Text="{Binding OlsResult.ModelSummary.RMSE, StringFormat={}{0:F4}}" FontSize="18" FontWeight="SemiBold" Foreground="#E67E22"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="4">
+                                <TextBlock Text="Adeq. Precision" FontSize="11" Foreground="#7F8C8D"/>
+                                <TextBlock Text="{Binding OlsResult.ModelSummary.AdequatePrecision, StringFormat={}{0:F2}}" FontSize="18" FontWeight="SemiBold" Foreground="#16A085"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="5">
+                                <TextBlock Text="LOF P值" FontSize="11" Foreground="#7F8C8D"/>
+                                <TextBlock Text="{Binding OlsResult.ModelSummary.LackOfFitP, StringFormat={}{0:F4}}" FontSize="18" FontWeight="SemiBold" Foreground="#C0392B"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                    <!-- 回归方程 -->
+                    <Border Background="#FAFBFC" CornerRadius="8" Padding="14,10" Margin="0,0,0,12" BorderBrush="#E8EAED" BorderThickness="1">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="回归方程" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                                <!-- 类别因子展开提示 -->
+                                <TextBlock Grid.Column="1" FontSize="10" Foreground="#8A8F9C"
+                       Visibility="{Binding HasCategoricalEquations, Converter={StaticResource BoolToVis}}">
+                <Run Text="按 "/>
+                <Run Text="{Binding CategoricalFactorName, Mode=OneWay}" FontWeight="Medium"/>
+                <Run Text=" 水平展开"/>
+                                </TextBlock>
+                            </Grid>
+
+                            <!-- 无类别因子: 显示单个方程 -->
+                            <TextBlock Text="{Binding OlsResult.ModelSummary.Equation}"
+                   FontSize="12" FontFamily="Consolas" Foreground="#2C3E50" TextWrapping="Wrap"
+                   Visibility="{Binding HasCategoricalEquations, Converter={StaticResource InverseBoolToVis}}"/>
+
+                            <!-- 有类别因子: 按水平展开多个方程 -->
+                            <ItemsControl ItemsSource="{Binding CategoryEquations}"
+                      Visibility="{Binding HasCategoricalEquations, Converter={StaticResource BoolToVis}}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Margin="0,0,0,6" Padding="10,6" Background="White" CornerRadius="4"
+                            BorderBrush="#E0E4EA" BorderThickness="1">
+                                            <StackPanel>
+                                                <TextBlock FontSize="11" FontWeight="SemiBold" Foreground="#0062B8" Margin="0,0,0,3">
+                                <Run Text="{Binding LevelName, Mode=OneWay}"/>
+                                                </TextBlock>
+                                                <TextBlock Text="{Binding Equation}" FontSize="11.5" FontFamily="Consolas"
+                                       Foreground="#2C3E50" TextWrapping="Wrap"/>
+                                            </StackPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Border>
+                    <!-- ANOVA 表 -->
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,0,0,12">
+                        <StackPanel>
+                            <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <TextBlock Text="ANOVA 方差分析表" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                            </Border>
+                            <DataGrid ItemsSource="{Binding OlsResult.AnovaTable}" AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="Horizontal" BorderThickness="0" CanUserAddRows="False" MaxHeight="300">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="来源" Binding="{Binding Source}" Width="120"/>
+                                    <DataGridTextColumn Header="自由度" Binding="{Binding DF}" Width="60"/>
+                                    <DataGridTextColumn Header="平方和 SS" Binding="{Binding SS, StringFormat={}{0:F4}}" Width="100"/>
+                                    <DataGridTextColumn Header="均方 MS" Binding="{Binding MS, StringFormat={}{0:F4}}" Width="100"/>
+                                    <DataGridTextColumn Header="F 值" Binding="{Binding FValue, StringFormat={}{0:F4}}" Width="80"/>
+                                    <DataGridTextColumn Header="P 值" Binding="{Binding PValue, StringFormat={}{0:F6}}" Width="90"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </StackPanel>
+                    </Border>
+                    <!-- Model Reduction 面板  -->
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,0,0,12">
+                        <StackPanel>
+                            <!-- 标题栏 -->
+                            <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="标准化效应 Pareto 图" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                                        <TextBlock Text="  (点击条形切换保留/删除)" FontSize="10" Foreground="#999" VerticalAlignment="Bottom" Margin="0,0,0,1"/>
+                                    </StackPanel>
+                                    <Button Grid.Column="1" Content="重新拟合精简模型" Command="{Binding RefitReducedModelCommand}"
+                        Padding="10,4" Margin="0,0,8,0" FontSize="11"
+                        Background="#FFF3E0" BorderBrush="#FFB74D" Cursor="Hand"
+                        ToolTip="按当前 Pareto 图中保留的项（蓝色条）重新拟合 OLS 模型"/>
+                                    <Button Grid.Column="2" Content="恢复完整模型" Command="{Binding RestoreFullModelCommand}"
+                        Padding="10,4" FontSize="11"
+                        Background="#F5F5F5" BorderBrush="#CCC" Cursor="Hand"/>
+                                </Grid>
+                            </Border>
+                            <!-- Pareto 图 -->
+                            <oxy:PlotView Model="{Binding OlsParetoPlot}" Height="280" Background="White" Margin="8"
+                       MouseDown="OlsPareto_MouseDown"/>
+                            <!-- 当前选中的项提示 -->
+                            <TextBlock Margin="14,0,14,10" FontSize="10" Foreground="#666" TextWrapping="Wrap">
+            <Run Text="保留项: "/><Run Text="{Binding IncludedTermsText, Mode=OneWay}" FontWeight="Medium" Foreground="#1565C0"/>
+            <Run Text="  |  删除项: "/><Run Text="{Binding ExcludedTermsText, Mode=OneWay}" Foreground="#999"/>
+                            </TextBlock>
+                        </StackPanel>
+                    </Border>
+                    <!-- 系数表 -->
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1">
+                        <StackPanel>
+                            <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <TextBlock Text="回归系数表" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                            </Border>
+                            <DataGrid ItemsSource="{Binding OlsResult.Coefficients}" AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="Horizontal" BorderThickness="0" CanUserAddRows="False" MaxHeight="300">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="项" Binding="{Binding Term}" Width="120"/>
+                                    <DataGridTextColumn Header="系数 β" Binding="{Binding Coefficient, StringFormat={}{0:F6}}" Width="100"/>
+                                    <DataGridTextColumn Header="标准误 SE" Binding="{Binding StdError, StringFormat={}{0:F6}}" Width="100"/>
+                                    <DataGridTextColumn Header="T 值" Binding="{Binding TValue, StringFormat={}{0:F4}}" Width="80"/>
+                                    <DataGridTextColumn Header="P 值" Binding="{Binding PValue, StringFormat={}{0:F6}}" Width="90"/>
+                                    <DataGridTextColumn Header="VIF" Binding="{Binding VIF, StringFormat={}{0:F2}}" Width="70"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </StackPanel>
+                    </Border>
+                    <!-- ─── (6) 残差四合一面板 — 在系数表后添加 -->
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,12,0,0">
+                        <StackPanel>
+                            <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <TextBlock Text="残差诊断四合一图" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                            </Border>
+                            <UniformGrid Rows="2" Columns="2" Margin="8">
+                                <!-- 左上: 正态概率图 -->
+                                <Border Margin="4">
+                                    <oxy:PlotView Model="{Binding NormalProbPlot}" Height="220" Background="White"/>
+                                </Border>
+                                <!-- 右上: 残差 vs 拟合值 -->
+                                <Border Margin="4">
+                                    <oxy:PlotView Model="{Binding ResidVsFittedPlot}" Height="220" Background="White"/>
+                                </Border>
+                                <!-- 左下: 残差直方图 -->
+                                <Border Margin="4">
+                                    <oxy:PlotView Model="{Binding ResidHistogramPlot}" Height="220" Background="White"/>
+                                </Border>
+                                <!-- 右下: 残差 vs 观测顺序 -->
+                                <Border Margin="4">
+                                    <oxy:PlotView Model="{Binding ResidVsOrderPlot}" Height="220" Background="White"/>
+                                </Border>
+                            </UniformGrid>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- ─── (7) ★ v6: 交互式预测刻画器 + 最优化 ─── -->
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,12,0,0">
+                        <StackPanel>
+                            <!-- 标题栏 -->
+                            <Border Background="#E8F5E9" Padding="14,8" BorderBrush="#C8E6C9" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <DockPanel>
+                                    <TextBlock Text="预测刻画器 &amp; 最优化" FontSize="12" FontWeight="SemiBold" Foreground="#2E7D32" VerticalAlignment="Center"/>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" DockPanel.Dock="Right">
+                                        <Button Content="生成刻画器" Command="{Binding LoadProfilerCommand}" 
+                                                Padding="10,4" FontSize="11" Background="#E8F5E9" BorderBrush="#66BB6A" Cursor="Hand" Margin="0,0,6,0"/>
+                                        <Button Content="求最大值" Command="{Binding FindOptimalMaxCommand}" 
+                                                Padding="10,4" FontSize="11" Background="#FFF3E0" BorderBrush="#FFA726" Cursor="Hand" Margin="0,0,6,0"/>
+                                        <Button Content="求最小值" Command="{Binding FindOptimalMinCommand}" 
+                                                Padding="10,4" FontSize="11" Background="#E3F2FD" BorderBrush="#42A5F5" Cursor="Hand"/>
+                                    </StackPanel>
+                                </DockPanel>
+                            </Border>
+
+                            <!-- 最优化结果 + 当前预测值 -->
+                            <Border Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1">
+                                <StackPanel>
+                                    <TextBlock Text="{Binding ProfilerCurrentPredicted}" FontSize="14" FontWeight="Bold" Foreground="#D32F2F" Margin="0,0,0,4"/>
+                                    <TextBlock Text="{Binding OptimalResultText}" FontSize="12" Foreground="#333" TextWrapping="Wrap"
+                                               FontFamily="Consolas" LineHeight="20"/>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- 预测刻画器图表（支持鼠标拖动） -->
+                            <ItemsControl x:Name="ProfilerItemsControl" ItemsSource="{Binding ProfilerPlots}" Margin="8,4,8,8">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <UniformGrid Rows="1"/>
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Margin="2" BorderBrush="#E8EAED" BorderThickness="1" CornerRadius="4" Background="White">
+                                            <oxy:PlotView Model="{Binding}" MinWidth="200" Height="220" Background="White"
+                                                          PreviewMouseDown="Profiler_MouseDown" PreviewMouseMove="Profiler_MouseMove" PreviewMouseUp="Profiler_MouseUp"/>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <!-- 提示文字 -->
+                            <TextBlock Text="拖动红色竖线可交互调整因子值，所有图同时更新。点击类别因子的条形可切换水平。"
+                                       FontSize="10" Foreground="#999" Margin="14,0,14,8" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+                    <!-- 4. Desirability -->
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,0,0,12">
+                        <StackPanel>
+                            <Border Background="#FFF8E1" Padding="14,8" BorderBrush="#FFE082" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="多响应 Desirability 优化" FontSize="12" FontWeight="SemiBold" Foreground="#F57F17"/>
+                                    <Button Content="运行优化" Command="{Binding RunDesirabilityCommand}" Padding="8,2" Margin="16,0,0,0" FontSize="11" Background="#FFF3E0" BorderBrush="#FFB74D" Cursor="Hand"/>
+                                </StackPanel>
+                            </Border>
+                            <StackPanel Margin="14,12">
+                                <TextBlock FontSize="16" FontWeight="SemiBold" Foreground="#E65100" Margin="0,0,0,8">
+                                    <TextBlock.Text>
+                                        <Binding Path="DesirabilityResult.CompositeD" StringFormat="综合 Desirability D = {0:F4}" FallbackValue="综合 Desirability D = —"/>
+                                    </TextBlock.Text></TextBlock>
+                                <ItemsControl ItemsSource="{Binding DesirabilityResult.IndividualD}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal" Margin="0,2">
+                                                <TextBlock Text="{Binding ResponseName}" Width="100" FontSize="12" Foreground="#555"/>
+                                                <TextBlock Text="{Binding PredictedValue, StringFormat=预测: {0:F2}}" Width="100" FontSize="12"/>
+                                                <TextBlock FontSize="12" FontWeight="SemiBold" Foreground="#E65100">
+                                                    <TextBlock.Text>
+                                                        <Binding Path="D" StringFormat="d = {0:F4}"/>
+                                                    </TextBlock.Text></TextBlock>
+                                                <TextBlock Text="{Binding Goal}" FontSize="11" Foreground="#999" Margin="8,0,0,0"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <TextBlock Text="提示：在设计向导 Step4 中配置各响应的优化目标（最大化/最小化/达标）和权重" FontSize="10" Foreground="#999" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Loading 遮罩 -->
+        <Border Grid.RowSpan="2" Background="#EAFFFFFF" Visibility="{Binding IsLoading, Converter={StaticResource BoolToVis}}" Panel.ZIndex="50">
+            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                <Grid Width="48" Height="48" Margin="0,0,0,14">
+                    <Ellipse Width="48" Height="48" Stroke="#E8EAED" StrokeThickness="3"/>
+                    <Ellipse Width="48" Height="48" Stroke="{StaticResource PrimaryBrush}" StrokeThickness="3" StrokeDashArray="8 6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" RenderTransformOrigin="0.5,0.5">
+                        <Ellipse.RenderTransform>
+                            <RotateTransform Angle="0"/>
+                        </Ellipse.RenderTransform>
+                        <Ellipse.Style>
+                            <Style TargetType="Ellipse">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsLoading}" Value="True">
+                                        <DataTrigger.EnterActions>
+                                            <BeginStoryboard x:Name="SpinStory">
+                                                <Storyboard RepeatBehavior="Forever">
+                                                    <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)" From="0" To="360" Duration="0:0:0.9"/>
+                                                </Storyboard>
+                                            </BeginStoryboard>
+                                        </DataTrigger.EnterActions>
+                                        <DataTrigger.ExitActions>
+                                            <StopStoryboard BeginStoryboardName="SpinStory"/>
+                                        </DataTrigger.ExitActions>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Ellipse.Style>
+                    </Ellipse>
+                </Grid>
+                <TextBlock Text="{Binding StatusMessage}" FontSize="13" FontWeight="Medium" Foreground="#1A1F36" HorizontalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</UserControl>

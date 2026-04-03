@@ -1,0 +1,286 @@
+﻿<UserControl x:Class="MaxChemical.Modules.DOE.Views.DOEMiniPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:converters="clr-namespace:MaxChemical.Modules.DOE.Converters"
+             Width="300">
+
+    <UserControl.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+        <converters:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVis"/>
+        <converters:ProgressToStrokeDashOffsetConverter x:Key="ProgressToOffset"/>
+    </UserControl.Resources>
+
+    <Border CornerRadius="12" Background="#0D1B3E" BorderBrush="#1E3A6E" BorderThickness="0.5"
+            MouseLeftButtonDown="TitleBar_MouseDown">
+        <Border.Effect>
+            <DropShadowEffect Color="#000" Direction="270" ShadowDepth="4" BlurRadius="16" Opacity="0.3"/>
+        </Border.Effect>
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- ═══ 标题栏 ═══ -->
+            <Grid Grid.Row="0" Margin="12,8,12,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- 环形进度 -->
+                <Grid Grid.Column="0" Width="24" Height="24" Margin="0,0,7,0">
+                    <Ellipse Width="24" Height="24" StrokeThickness="2" Stroke="#14FFFFFF" Fill="Transparent"/>
+                    <Ellipse Width="24" Height="24" StrokeThickness="2" Fill="Transparent"
+                             StrokeDashArray="3.54 100" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                             RenderTransformOrigin="0.5,0.5">
+                        <Ellipse.RenderTransform>
+                            <RotateTransform Angle="-90"/>
+                        </Ellipse.RenderTransform>
+                        <Ellipse.Style>
+                            <Style TargetType="Ellipse">
+                                <Setter Property="Stroke" Value="#3B9EFF"/>
+                                <Setter Property="StrokeDashArray">
+                                    <Setter.Value>
+                                        <DoubleCollection>3.54,100</DoubleCollection>
+                                    </Setter.Value>
+                                </Setter>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsPaused}" Value="True">
+                                        <Setter Property="Stroke" Value="#F0A030"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Ellipse.Style>
+                    </Ellipse>
+                    <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center"
+                               FontSize="7" FontWeight="SemiBold" Foreground="#D9FFFFFF"
+                               Text="{Binding ProgressPercent, StringFormat={}{0:F0}%}"/>
+                </Grid>
+
+                <!-- 标题文字 -->
+                <TextBlock Grid.Column="1" VerticalAlignment="Center" FontSize="11" FontWeight="SemiBold">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Text" Value="DOE 执行中"/>
+                            <Setter Property="Foreground" Value="#E0FFFFFF"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsPaused}" Value="True">
+                                    <Setter Property="Text" Value="已暂停"/>
+                                    <Setter Property="Foreground" Value="#F0A030"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+
+                <!-- 展开按钮 -->
+                <Button Grid.Column="2" Width="22" Height="22" Cursor="Hand" ToolTip="展开为大窗口"
+                        Command="{Binding ToggleMiniModeCommand}">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="Bd" CornerRadius="5" Background="#0FFFFFFF"
+                                    BorderBrush="#1AFFFFFF" BorderThickness="0.5">
+                                <Path Data="M 1.5,7.5 L 1.5,1.5 L 7.5,1.5 M 10.5,4.5 L 10.5,10.5 L 4.5,10.5"
+                                      Stroke="#73FFFFFF" StrokeThickness="1.3"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                      Width="12" Height="12" Stretch="Uniform"
+                                      HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="#1AFFFFFF"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
+            </Grid>
+
+            <!-- ═══ 进度区域 ═══ -->
+            <StackPanel Grid.Row="1" Margin="12,6,12,8">
+                <!-- 大数字 + 状态标签 -->
+                <Grid Margin="0,0,0,7">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Bottom">
+                        <TextBlock FontSize="26" FontWeight="Bold" Foreground="White" FontFamily="Segoe UI"
+                                   Text="{Binding CurrentRun, Mode=OneWay}"/>
+                        <TextBlock FontSize="12" Foreground="#4DFFFFFF" FontWeight="Medium"
+                                   VerticalAlignment="Bottom" Margin="4,0,0,4">
+                            <Run Text="/"/>
+                            <Run Text=" "/>
+                            <Run Text="{Binding TotalRuns, Mode=OneWay}"/>
+                            <Run Text=" 组"/>
+                        </TextBlock>
+                    </StackPanel>
+
+                    <!-- 状态胶囊 -->
+                    <Border HorizontalAlignment="Right" VerticalAlignment="Center"
+                            CornerRadius="10" Padding="8,2">
+                        <Border.Style>
+                            <Style TargetType="Border">
+                                <Setter Property="Background" Value="#1E3B9EFF"/>
+                                <Setter Property="BorderBrush" Value="#403B9EFF"/>
+                                <Setter Property="BorderThickness" Value="0.5"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsPaused}" Value="True">
+                                        <Setter Property="Background" Value="#26F0A030"/>
+                                        <Setter Property="BorderBrush" Value="#4DF0A030"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                        <TextBlock FontSize="9" FontWeight="Medium">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Text" Value="{Binding StatusMessage}"/>
+                                    <Setter Property="Foreground" Value="#6BB8FF"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsPaused}" Value="True">
+                                            <Setter Property="Foreground" Value="#F0C060"/>
+                                            <Setter Property="Text" Value="已暂停"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Border>
+                </Grid>
+
+                <!-- 分段进度条 -->
+                <ItemsControl ItemsSource="{Binding ProgressSegments}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <UniformGrid Rows="1"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Height="3.5" CornerRadius="2" Margin="0.75,0"
+                                    Background="{Binding Background}"/>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+
+            <!-- ═══ 因子参数 ═══ -->
+            <Border Grid.Row="2" Margin="12,0,12,8" Padding="10,8" CornerRadius="8"
+                    Background="#0AFFFFFF" BorderBrush="#0FFFFFFF" BorderThickness="0.5"
+                    Visibility="{Binding HasCurrentFactors, Converter={StaticResource BoolToVis}}">
+                <ItemsControl ItemsSource="{Binding CurrentFactorItems}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <UniformGrid Rows="1"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel HorizontalAlignment="Center">
+                                <TextBlock Text="{Binding Label}" FontSize="8" Foreground="#4DFFFFFF"
+                                           HorizontalAlignment="Center" Margin="0,0,0,2"
+                                           FontWeight="Medium"/>
+                                <TextBlock Text="{Binding Value}" FontSize="13" FontWeight="Bold"
+                                           Foreground="#E6FFFFFF" HorizontalAlignment="Center"
+                                           FontFamily="Consolas"/>
+                                <TextBlock Text="{Binding Unit}" FontSize="8" Foreground="#33FFFFFF"
+                                           HorizontalAlignment="Center" Margin="0,1,0,0"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Border>
+
+            <!-- ═══ 控制按钮 ═══ -->
+            <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="12,0,12,10">
+                <!-- 暂停按钮（执行中可见） -->
+                <Button Command="{Binding PauseCommand}" Margin="0,0,5,0"
+                        Visibility="{Binding IsPaused, Converter={StaticResource InverseBoolToVis}}">
+                    <Button.Style>
+                        <Style TargetType="Button">
+                            <Setter Property="Width" Value="139"/>
+                            <Setter Property="Height" Value="28"/>
+                            <Setter Property="Cursor" Value="Hand"/>
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" CornerRadius="6" Background="#0FFFFFFF"
+                                                BorderBrush="#1EFFFFFF" BorderThickness="0.5">
+                                            <TextBlock Text="暂停" FontSize="10" FontWeight="SemiBold"
+                                                       Foreground="#A6FFFFFF" HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#18FFFFFF"/>
+                                            </Trigger>
+                                            <Trigger Property="IsEnabled" Value="False">
+                                                <Setter TargetName="Bd" Property="Opacity" Value="0.4"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </Button.Style>
+                </Button>
+
+                <!-- 恢复按钮（暂停时可见） -->
+                <Button Command="{Binding ResumeCommand}" Margin="0,0,5,0"
+                        Visibility="{Binding IsPaused, Converter={StaticResource BoolToVis}}">
+                    <Button.Style>
+                        <Style TargetType="Button">
+                            <Setter Property="Width" Value="139"/>
+                            <Setter Property="Height" Value="28"/>
+                            <Setter Property="Cursor" Value="Hand"/>
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" CornerRadius="6"
+                                                Background="#1A50C850" BorderBrush="#4D50C850" BorderThickness="0.5">
+                                            <TextBlock Text="恢复执行" FontSize="10" FontWeight="SemiBold"
+                                                       Foreground="#60D860" HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#2650C850"/>
+                                            </Trigger>
+                                            <Trigger Property="IsEnabled" Value="False">
+                                                <Setter TargetName="Bd" Property="Opacity" Value="0.4"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </Button.Style>
+                </Button>
+
+                <!-- 终止按钮 -->
+                <Button Command="{Binding AbortCommand}" Width="139" Height="28" Cursor="Hand">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="Bd" CornerRadius="6"
+                                    Background="#14DC5050" BorderBrush="#4DDC6464" BorderThickness="0.5">
+                                <TextBlock Text="终止" FontSize="10" FontWeight="SemiBold"
+                                           Foreground="#E07070" HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"/>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="#20DC5050"/>
+                                </Trigger>
+                                <Trigger Property="IsEnabled" Value="False">
+                                    <Setter TargetName="Bd" Property="Opacity" Value="0.4"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
+            </StackPanel>
+        </Grid>
+    </Border>
+</UserControl>

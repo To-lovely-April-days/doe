@@ -1,0 +1,22 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+	  <TargetFramework>net8.0-windows</TargetFramework>
+	  <ImplicitUsings>enable</ImplicitUsings>
+	  <Nullable>enable</Nullable>
+	  <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Prism.Core" Version="8.1.97" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MaxChemical.Data\MaxChemical.Data.csproj" />
+    <ProjectReference Include="..\MaxChemical.Infrastructure\MaxChemical.Infrastructure.csproj" />
+    <ProjectReference Include="..\MaxChemical.Modules.Data\MaxChemical.Modules.Data.csproj" />
+    <ProjectReference Include="..\MaxChemical.Modules.Designer\MaxChemical.Modules.Designer.csproj" />
+  </ItemGroup>
+
+</Project>

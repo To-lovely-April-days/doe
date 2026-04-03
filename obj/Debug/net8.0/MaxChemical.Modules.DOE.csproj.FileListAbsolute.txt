@@ -1,0 +1,5 @@
+D:\Project\智能连续流\MaxChemical\MaxChemical.Modules.DOE\obj\Debug\net8.0\MaxChemical.Modules.DOE.csproj.AssemblyReference.cache
+D:\Project\智能连续流\MaxChemical\MaxChemical.Modules.DOE\obj\Debug\net8.0\MaxChemical.Modules.DOE.GeneratedMSBuildEditorConfig.editorconfig
+D:\Project\智能连续流\MaxChemical\MaxChemical.Modules.DOE\obj\Debug\net8.0\MaxChemical.Modules.DOE.AssemblyInfoInputs.cache
+D:\Project\智能连续流\MaxChemical\MaxChemical.Modules.DOE\obj\Debug\net8.0\MaxChemical.Modules.DOE.AssemblyInfo.cs
+D:\Project\智能连续流\MaxChemical\MaxChemical.Modules.DOE\obj\Debug\net8.0\MaxChemical.Modules.DOE.csproj.CoreCompileInputs.cache

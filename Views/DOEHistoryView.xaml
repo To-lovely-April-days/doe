@@ -1,0 +1,77 @@
+<UserControl x:Class="MaxChemical.Modules.DOE.Views.DOEHistoryView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="#F2F4F7">
+    <UserControl.Resources>
+        <ResourceDictionary Source="DOEStyles.xaml"/>
+    </UserControl.Resources>
+    <Grid Margin="22">
+        <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <Border Background="#FAFBFC" Padding="14,10" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                    <Grid>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="历史批次" FontSize="13" FontWeight="SemiBold" Foreground="#1A1F36" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                            <Button Content="刷新" Style="{StaticResource DOEPrimaryBtn}" Padding="14,5" Height="26" Command="{Binding RefreshCommand}" Margin="0,0,6,0"/>
+                            <Button Content="导出对比报告" Padding="14,5" Height="26" Command="{Binding ExportComparisonCommand}" Foreground="White" FontSize="10" FontWeight="SemiBold" Cursor="Hand" BorderThickness="0">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border CornerRadius="6" Padding="{TemplateBinding Padding}" Background="#5B2D90">
+                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+                        </StackPanel>
+                        <TextBlock Text="{Binding StatusMessage}" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="11" Foreground="#8A8F9C"/>
+                    </Grid>
+                </Border>
+
+                <DataGrid Grid.Row="1" ItemsSource="{Binding Batches}" SelectedItem="{Binding SelectedBatch}"
+                          Style="{StaticResource DOEDataGrid}" ColumnHeaderStyle="{StaticResource DOEColHeader}"
+                          MouseDoubleClick="BatchList_DoubleClick">
+                    <DataGrid.ContextMenu>
+                        <ContextMenu Style="{StaticResource DOEContextMenu}"
+                                     DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                            <MenuItem Header="编辑方案" Style="{StaticResource DOEMenuItem}" Command="{Binding EditBatchCommand}"
+                                      CommandParameter="{Binding SelectedBatch}"/>
+                            <MenuItem Header="跳转执行" Style="{StaticResource DOEMenuItem}" Command="{Binding NavigateToExecutionCommand}"/>
+                            <MenuItem Header="查看分析" Style="{StaticResource DOEMenuItem}" Command="{Binding NavigateToAnalysisCommand}"/>
+                            <Separator/>
+                            <MenuItem Header="导出 Excel 报告" Style="{StaticResource DOEMenuItem}" Command="{Binding ExportBatchCommand}"/>
+                            <MenuItem Header="复用此方案" Style="{StaticResource DOEMenuItem}" Command="{Binding ReuseBatchCommand}"/>
+                            <Separator/>
+                            <MenuItem Header="删除批次" Style="{StaticResource DOEMenuItemDanger}" Command="{Binding DeleteBatchCommand}"/>
+                        </ContextMenu>
+                    </DataGrid.ContextMenu>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="批次名称" Binding="{Binding BatchName}" Width="*">
+                            <DataGridTextColumn.ElementStyle>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="FontWeight" Value="SemiBold"/>
+                                    <Setter Property="Foreground" Value="#1A1F36"/>
+                                    <Setter Property="Padding" Value="18,0,0,0"/>
+                                    <Setter Property="VerticalAlignment" Value="Center"/>
+                                </Style>
+                            </DataGridTextColumn.ElementStyle>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Header="设计方法" Binding="{Binding DesignMethod}" Width="110"/>
+                        <DataGridTextColumn Header="进度" Binding="{Binding ProgressText}" Width="90"/>
+                        <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="80"/>
+                        <DataGridTextColumn Header="创建时间" Binding="{Binding CreatedTime, StringFormat={}{0:MM-dd HH:mm}}" Width="100"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <Border Grid.Row="2" Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,1,0,0">
+                    <TextBlock Text="双击行 → 跳转执行页  |  右键行 → 操作菜单" FontSize="10" Foreground="#A0A4B0"/>
+                </Border>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

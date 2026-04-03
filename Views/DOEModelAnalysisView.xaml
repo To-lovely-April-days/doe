@@ -389,6 +389,10 @@
                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                                     <TextBlock Text="分析响应:" VerticalAlignment="Center" FontSize="11" Foreground="#7F8C8D" Margin="0,0,6,0"/>
                                     <ComboBox ItemsSource="{Binding ResponseNames}" SelectedItem="{Binding SelectedResponseName}" Width="120" FontSize="11"/>
+                                    <!-- ★ v9: 导出报告按钮 -->
+                                    <Button Content="导出报告" Command="{Binding ExportReportCommand}"
+                                            Padding="10,4" FontSize="11" Background="#E3F2FD" BorderBrush="#42A5F5" Cursor="Hand"
+                                            Margin="12,0,0,0" ToolTip="将当前 OLS 分析结果导出为 Word 报告"/>
                                 </StackPanel>
                             </Grid>
                         </Border>
@@ -437,6 +441,23 @@
 
                 <!-- OLS 结果面板（选择批次后显示） -->
                 <StackPanel Visibility="{Binding HasOlsResult, Converter={StaticResource BoolToVis}}">
+
+                    <!-- ★ v7 新增: 不可估计项警告条 -->
+                    <Border Background="#FFF3E0" CornerRadius="8" Padding="12,8" Margin="0,0,0,10"
+                            BorderBrush="#FFB74D" BorderThickness="1"
+                            Visibility="{Binding HasInestimableWarning, Converter={StaticResource BoolToVis}}">
+                        <DockPanel>
+                            <TextBlock Text="⚠" FontSize="16" Foreground="#E65100" VerticalAlignment="Center"
+                                       Margin="0,0,10,0" DockPanel.Dock="Left"/>
+                            <StackPanel>
+                                <TextBlock Text="模型项自动剔除提醒" FontSize="11" FontWeight="SemiBold" Foreground="#E65100" Margin="0,0,0,2"/>
+                                <TextBlock Text="{Binding InestimableWarning}" FontSize="11" Foreground="#BF360C" TextWrapping="Wrap"/>
+                                <TextBlock Text="提示: 数据量不足或存在完全共线性的因子组合，部分高阶项无法估计已被自动移除。可通过增加实验组数或降低模型阶次解决。"
+                                           FontSize="10" Foreground="#999" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </DockPanel>
+                    </Border>
+
                     <!-- 模型摘要 -->
                     <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Padding="16" Margin="0,0,0,12">
                         <Grid>
@@ -535,6 +556,29 @@
                             </DataGrid>
                         </StackPanel>
                     </Border>
+                    <!-- ★ v8: 主效应图 + 交互效应图 (并排) -->
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,0,0,12">
+                        <StackPanel>
+                            <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <TextBlock Text="主效应图 &amp; 交互效应图" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                            </Border>
+                            <Grid Margin="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <!-- 左: 主效应图 -->
+                                <Border Grid.Column="0" Margin="0,0,4,0" BorderBrush="#ECEEF2" BorderThickness="1" CornerRadius="6">
+                                    <oxy:PlotView Model="{Binding OlsMainEffectsPlot}" Height="260" Background="White" Margin="4"/>
+                                </Border>
+                                <!-- 右: 交互效应图 -->
+                                <Border Grid.Column="1" Margin="4,0,0,0" BorderBrush="#ECEEF2" BorderThickness="1" CornerRadius="6">
+                                    <oxy:PlotView Model="{Binding OlsInteractionPlot}" Height="260" Background="White" Margin="4"/>
+                                </Border>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
                     <!-- Model Reduction 面板  -->
                     <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,0,0,12">
                         <StackPanel>
@@ -587,7 +631,7 @@
                             </DataGrid>
                         </StackPanel>
                     </Border>
-                    <!-- ─── (6) 残差四合一面板 — 在系数表后添加 -->
+                    <!-- ─── (6) 残差四合一面板 ─── -->
                     <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,12,0,0">
                         <StackPanel>
                             <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
@@ -614,7 +658,194 @@
                         </StackPanel>
                     </Border>
 
-                    <!-- ─── (7) ★ v6: 交互式预测刻画器 + 最优化 ─── -->
+                    <!-- ★ v9: Box-Cox 响应变换分析 -->
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,12,0,0"
+                            Visibility="{Binding HasBoxCoxResult, Converter={StaticResource BoolToVis}}">
+                        <StackPanel>
+                            <Border Background="#F3E5F5" Padding="14,8" BorderBrush="#CE93D8" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <DockPanel>
+                                    <TextBlock Text="Box-Cox 响应变换分析" FontSize="12" FontWeight="SemiBold" Foreground="#6A1B9A" VerticalAlignment="Center"/>
+                                    <Button Content="应用变换并重拟合" Command="{Binding ApplyBoxCoxCommand}"
+                                            Padding="10,4" FontSize="11" Background="#F3E5F5" BorderBrush="#AB47BC" Cursor="Hand"
+                                            HorizontalAlignment="Right" DockPanel.Dock="Right"
+                                            Visibility="{Binding BoxCoxRecommend, Converter={StaticResource BoolToVis}}"
+                                            ToolTip="用推荐的 λ 值变换响应变量后重新拟合 OLS 模型"/>
+                                </DockPanel>
+                            </Border>
+                            <Grid Margin="14,10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="280"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                        <TextBlock Text="最优 λ = " FontSize="12" Foreground="#555" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding BoxCoxLambda, StringFormat={}{0:F2}}" FontSize="16" FontWeight="Bold" Foreground="#6A1B9A" VerticalAlignment="Center"/>
+                                        <TextBlock Text="  →  " FontSize="12" Foreground="#999" VerticalAlignment="Center" Margin="8,0"/>
+                                        <TextBlock Text="{Binding BoxCoxTransformName}" FontSize="13" FontWeight="SemiBold" Foreground="#8E24AA" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                    <Grid Margin="0,4,0,8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="20"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0">
+                                            <TextBlock Text="变换前 R²" FontSize="10" Foreground="#999"/>
+                                            <TextBlock Text="{Binding BoxCoxOrigR2, StringFormat={}{0:F4}}" FontSize="15" FontWeight="SemiBold" Foreground="#555"/>
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="1" Text="→" FontSize="14" Foreground="#CCC" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                                        <StackPanel Grid.Column="2">
+                                            <TextBlock Text="变换后 R²" FontSize="10" Foreground="#999"/>
+                                            <TextBlock Text="{Binding BoxCoxTransR2, StringFormat={}{0:F4}}" FontSize="15" FontWeight="SemiBold" Foreground="#6A1B9A"/>
+                                        </StackPanel>
+                                    </Grid>
+                                    <TextBlock Text="{Binding BoxCoxRecommendation}" FontSize="11" Foreground="#555" TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <Border Grid.Column="1" Margin="10,0,0,0" BorderBrush="#ECEEF2" BorderThickness="1" CornerRadius="6">
+                                    <oxy:PlotView Model="{Binding BoxCoxProfilePlot}" Height="160" Background="White" Margin="2"/>
+                                </Border>
+                            </Grid>
+                            <TextBlock Text="Box-Cox 变换通过调整 λ 使残差更接近正态分布。λ=1 表示无需变换。红色虚线标记最优 λ，蓝色虚线标记 95% CI。"
+                                       FontSize="10" Foreground="#999" Margin="14,0,14,10" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+                    <!-- ★ v8: 异常点分析面板 -->
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,12,0,0"
+        Visibility="{Binding HasOutliers, Converter={StaticResource BoolToVis}}">
+                        <StackPanel>
+                            <!-- 标题栏 -->
+                            <Border Background="#FFF3E0" Padding="14,8" BorderBrush="#FFE0B2" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <DockPanel>
+                                    <TextBlock Text="⚠ 异常点检测" FontSize="12" FontWeight="SemiBold" Foreground="#E65100" VerticalAlignment="Center"/>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" DockPanel.Dock="Right">
+                                        <Button Content="排除选中项并重拟合" Command="{Binding ExcludeOutliersCommand}"
+                            Padding="10,4" FontSize="11" Background="#FFF3E0" BorderBrush="#FF9800" Cursor="Hand" Margin="0,0,6,0"
+                            ToolTip="勾选异常点后点击此按钮，将排除这些点重新拟合 OLS 模型"/>
+                                        <Button Content="恢复全部数据" Command="{Binding RestoreAllDataCommand}"
+                            Padding="10,4" FontSize="11" Background="#F5F5F5" BorderBrush="#CCC" Cursor="Hand"/>
+                                    </StackPanel>
+                                </DockPanel>
+                            </Border>
+                            <!-- 摘要信息 -->
+                            <TextBlock Text="{Binding OutlierSummaryText}" FontSize="11" Foreground="#795548" Margin="14,8,14,4" TextWrapping="Wrap"/>
+                            <!-- 异常点表格 -->
+                            <DataGrid ItemsSource="{Binding OutlierItems}" AutoGenerateColumns="False" IsReadOnly="False"
+                  HeadersVisibility="Column" GridLinesVisibility="Horizontal" BorderThickness="0"
+                  CanUserAddRows="False" MaxHeight="200" Margin="8,0,8,8">
+                                <DataGrid.Columns>
+                                    <DataGridCheckBoxColumn Header="排除" Binding="{Binding IsExcluded, UpdateSourceTrigger=PropertyChanged}" Width="45"/>
+                                    <DataGridTextColumn Header="#" Binding="{Binding Index}" Width="40" IsReadOnly="True"/>
+                                    <DataGridTextColumn Header="实际值" Binding="{Binding Actual, StringFormat={}{0:F2}}" Width="70" IsReadOnly="True"/>
+                                    <DataGridTextColumn Header="预测值" Binding="{Binding Predicted, StringFormat={}{0:F2}}" Width="70" IsReadOnly="True"/>
+                                    <DataGridTextColumn Header="标准化残差" Binding="{Binding StdResidual, StringFormat={}{0:F2}}" Width="85" IsReadOnly="True"/>
+                                    <DataGridTextColumn Header="Cook's D" Binding="{Binding CooksD, StringFormat={}{0:F4}}" Width="80" IsReadOnly="True"/>
+                                    <DataGridTextColumn Header="杠杆值" Binding="{Binding Leverage, StringFormat={}{0:F3}}" Width="70" IsReadOnly="True"/>
+                                    <DataGridTextColumn Header="异常原因" Binding="{Binding Reasons}" Width="*" IsReadOnly="True"/>
+                                </DataGrid.Columns>
+                                <DataGrid.RowStyle>
+                                    <Style TargetType="DataGridRow">
+                                        <Setter Property="Background" Value="#FFF8E1"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsExcluded}" Value="True">
+                                                <Setter Property="Background" Value="#FFEBEE"/>
+                                                <Setter Property="FontStyle" Value="Italic"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGrid.RowStyle>
+                            </DataGrid>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- ─── ★ v7 新增: OLS 响应曲面 + 等高线 ─── -->
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,12,0,0">
+                        <StackPanel>
+                            <!-- 标题栏 -->
+                            <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="OLS 响应曲面 &amp; 等高线" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36" VerticalAlignment="Center"/>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                        <ComboBox ItemsSource="{Binding OlsContinuousFactors}" SelectedItem="{Binding OlsSurfaceFactor1}"
+                                                  Width="110" FontSize="11" Padding="4,3" Margin="0,0,4,0"/>
+                                        <TextBlock Text="×" VerticalAlignment="Center" Foreground="#8A8F9C" FontSize="11" Margin="0,0,4,0"/>
+                                        <ComboBox ItemsSource="{Binding OlsContinuousFactors}" SelectedItem="{Binding OlsSurfaceFactor2}"
+                                                  Width="110" FontSize="11" Padding="4,3" Margin="0,0,8,0"/>
+                                        <Button Content="生成" Command="{Binding GenerateOlsSurfaceCommand}"
+                                                Padding="14,5" Height="26" FontSize="11"
+                                                Background="#2E86C1" Foreground="White" Cursor="Hand">
+                                            <Button.Template>
+                                                <ControlTemplate TargetType="Button">
+                                                    <Border x:Name="Bd" CornerRadius="6" Padding="{TemplateBinding Padding}"
+                                                            Background="{TemplateBinding Background}">
+                                                        <TextBlock Text="{TemplateBinding Content}" FontSize="11" FontWeight="SemiBold"
+                                                                   Foreground="{TemplateBinding Foreground}" HorizontalAlignment="Center"/>
+                                                    </Border>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter TargetName="Bd" Property="Background" Value="#1A6FA0"/>
+                                                        </Trigger>
+                                                        <Trigger Property="IsEnabled" Value="False">
+                                                            <Setter TargetName="Bd" Property="Opacity" Value="0.4"/>
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Button.Template>
+                                        </Button>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <!-- 曲面 + 等高线 并排 -->
+                            <Grid Margin="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <!-- 左: 3D 响应曲面（matplotlib PNG） -->
+                                <Border Grid.Column="0" Margin="0,0,4,0" BorderBrush="#ECEEF2" BorderThickness="1" CornerRadius="6">
+                                    <Grid>
+                                        <Image Source="{Binding OlsSurfaceImage}" Stretch="Uniform" Height="300" Margin="4">
+                                            <Image.Style>
+                                                <Style TargetType="Image">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding OlsSurfaceImage}" Value="{x:Null}">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Image.Style>
+                                        </Image>
+                                        <TextBlock Text="请选择两个连续因子后点击 [生成]" FontSize="11" Foreground="#AAA"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding OlsSurfaceImage}" Value="{x:Null}">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </Grid>
+                                </Border>
+                                <!-- 右: 等高线图（OxyPlot） -->
+                                <Border Grid.Column="1" Margin="4,0,0,0" BorderBrush="#ECEEF2" BorderThickness="1" CornerRadius="6">
+                                    <oxy:PlotView Model="{Binding OlsContourPlot}" Height="300" Background="White" Margin="4"/>
+                                </Border>
+                            </Grid>
+                            <TextBlock Text="左: 3D 响应曲面（基于 OLS 回归模型）  |  右: 等高线图（其他因子固定在中心值）"
+                                       FontSize="10" Foreground="#999" Margin="14,0,14,8" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- ─── (7) 交互式预测刻画器 + 最优化 ─── -->
                     <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,12,0,0">
                         <StackPanel>
                             <!-- 标题栏 -->
@@ -663,8 +894,54 @@
                                        FontSize="10" Foreground="#999" Margin="14,0,14,8" TextWrapping="Wrap"/>
                         </StackPanel>
                     </Border>
-                    <!-- 4. Desirability -->
-                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,0,0,12">
+                    <!-- ★ v8: Tukey HSD 多重比较表 -->
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,12,0,0"
+        Visibility="{Binding HasTukeyResult, Converter={StaticResource BoolToVis}}">
+                        <StackPanel>
+                            <Border Background="#E8EAF6" Padding="14,8" BorderBrush="#C5CAE9" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                                <TextBlock FontSize="12" FontWeight="SemiBold" Foreground="#283593">
+                <Run Text="Tukey HSD 多重比较 — "/>
+                <Run Text="{Binding TukeyFactorName, Mode=OneWay}"/>
+                                </TextBlock>
+                            </Border>
+                            <DataGrid ItemsSource="{Binding TukeyComparisons}" AutoGenerateColumns="False" IsReadOnly="True"
+                  HeadersVisibility="Column" GridLinesVisibility="Horizontal" BorderThickness="0"
+                  CanUserAddRows="False" Margin="8">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="" Binding="{Binding SignificanceMarker}" Width="25">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="#D32F2F"/>
+                                                <Setter Property="FontWeight" Value="Bold"/>
+                                                <Setter Property="FontSize" Value="14"/>
+                                                <Setter Property="HorizontalAlignment" Value="Center"/>
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="比较" Binding="{Binding ComparisonText}" Width="120"/>
+                                    <DataGridTextColumn Header="均值差" Binding="{Binding DiffText}" Width="90"/>
+                                    <DataGridTextColumn Header="P 值" Binding="{Binding PValueText}" Width="80"/>
+                                    <DataGridTextColumn Header="95% CI" Binding="{Binding CIText}" Width="120"/>
+                                </DataGrid.Columns>
+                                <DataGrid.RowStyle>
+                                    <Style TargetType="DataGridRow">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Significant}" Value="True">
+                                                <Setter Property="Background" Value="#FFF3E0"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGrid.RowStyle>
+                            </DataGrid>
+                            <TextBlock Text="★ 表示显著差异 (p &lt; 0.05)。Tukey HSD 控制家族误差率，适合多水平间全面比较。"
+                   FontSize="10" Foreground="#999" Margin="14,0,14,10" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+
+
+                    <!-- Desirability -->
+                    <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,12,0,12">
                         <StackPanel>
                             <Border Background="#FFF8E1" Padding="14,8" BorderBrush="#FFE082" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
                                 <StackPanel Orientation="Horizontal">

@@ -12,9 +12,8 @@ namespace MaxChemical.Modules.DOE.Services
 {
     /// <summary>
     /// DOE 数据分析服务
-    /// 
-    ///  修改: 新增 FitOlsAsync / GetResidualDiagnosticsAsync / GetEffectsParetoAsync
-    ///   这三个方法调用 Python DOEAnalyzer 的新方法: fit_ols() / residual_diagnostics() / effects_pareto()
+    /// ★ v7 新增: GetOlsResponseSurfaceDataAsync / GetOlsResponseSurfaceImageAsync / GetOlsContourDataAsync
+    ///           + FitOlsAsync 解析 dropped_terms / inestimable_warning
     /// </summary>
     public class DOEAnalysisService : IDOEAnalysisService
     {
@@ -24,7 +23,8 @@ namespace MaxChemical.Modules.DOE.Services
         private dynamic? _analyzer;
         private dynamic? _plotter;
         private bool _isPythonInitialized;
-
+        private string _loadedBatchId = "";
+        private string _loadedResponseName = "";
         public DOEAnalysisService(IDOERepository repository, IGPRModelService gprService, ILogService logger)
         {
             _repository = repository ?? throw new ArgumentNullException(nameof(repository));
@@ -58,7 +58,6 @@ namespace MaxChemical.Modules.DOE.Services
 
         /// <summary>
         /// 加载批次数据到 Python 分析器
-        ///  修改: 支持指定 responseName（多响应时逐个分析）
         /// </summary>
         private async Task LoadBatchDataAsync(string batchId, string? responseName = null)
         {
@@ -73,7 +72,6 @@ namespace MaxChemical.Modules.DOE.Services
             if (completedRuns.Count == 0)
                 throw new InvalidOperationException("批次没有已完成的实验数据");
 
-            //  修改: 支持指定响应变量名
             var primaryResponse = responseName ?? batch.Responses.FirstOrDefault()?.ResponseName ?? "Y";
 
             var factorsData = completedRuns
@@ -91,14 +89,11 @@ namespace MaxChemical.Modules.DOE.Services
             var factorsJson = JsonConvert.SerializeObject(factorsData);
             var responsesJson = JsonConvert.SerializeObject(responsesData);
 
-            // ★ 新增: 构建因子类型字典，传给 Python 区分连续/类别因子
             var factorTypesDict = new Dictionary<string, string>();
             if (batch.Factors != null)
             {
                 foreach (var f in batch.Factors)
-                {
                     factorTypesDict[f.FactorName] = f.IsCategorical ? "categorical" : "continuous";
-                }
             }
             var factorTypesJson = JsonConvert.SerializeObject(factorTypesDict);
 
@@ -108,8 +103,27 @@ namespace MaxChemical.Modules.DOE.Services
             }
         }
 
+        /// <summary>
+        /// ★ v7 新增: 构建因子范围 JSON（供 OLS 响应曲面方法使用）
+        /// </summary>
+        private async Task<string> BuildBoundsJsonAsync(string batchId)
+        {
+            var batch = await _repository.GetBatchWithDetailsAsync(batchId);
+            if (batch == null) return "{}";
+
+            var boundsDict = new Dictionary<string, object>();
+            foreach (var f in batch.Factors)
+            {
+                if (f.IsCategorical)
+                    boundsDict[f.FactorName] = f.GetCategoryLevelList();
+                else
+                    boundsDict[f.FactorName] = new[] { f.LowerBound, f.UpperBound };
+            }
+            return JsonConvert.SerializeObject(boundsDict);
+        }
+
         // ═══════════════════════════════════════════════════════
-        //  新增: 完整 OLS 回归分析
+        // OLS 回归分析 — ★ v7 改造: 解析 dropped_terms
         // ═══════════════════════════════════════════════════════
 
         public async Task<OLSAnalysisResult> FitOlsAsync(string batchId, string responseName, string modelType = "quadratic")
@@ -117,7 +131,7 @@ namespace MaxChemical.Modules.DOE.Services
             EnsureReady();
             await LoadBatchDataAsync(batchId, responseName);
 
-            _logger.LogInformation(" FitOLS: batchId={BatchId}, response={Response}, model={Model}",
+            _logger.LogInformation("FitOLS: batchId={BatchId}, response={Response}, model={Model}",
                 batchId, responseName, modelType);
 
             using (Py.GIL())
@@ -128,12 +142,16 @@ namespace MaxChemical.Modules.DOE.Services
                 if (pyResult == null || pyResult.Error != null)
                 {
                     _logger.LogError("FitOLS 失败: {Error}", pyResult?.Error ?? "未知错误");
-                    return new OLSAnalysisResult();
+                    return new OLSAnalysisResult
+                    {
+                        // ★ v7: 即使失败也返回 dropped_terms
+                        DroppedTerms = pyResult?.DroppedTerms ?? new(),
+                        InestimableWarning = pyResult?.InestimableWarning ?? ""
+                    };
                 }
 
                 var result = new OLSAnalysisResult();
 
-                // 解析 ANOVA 表
                 if (pyResult.AnovaTable != null)
                 {
                     result.AnovaTable = pyResult.AnovaTable.Select(row => new AnovaRow
@@ -147,7 +165,6 @@ namespace MaxChemical.Modules.DOE.Services
                     }).ToList();
                 }
 
-                // 解析系数表
                 if (pyResult.Coefficients != null)
                 {
                     result.Coefficients = pyResult.Coefficients.Select(c => new CoefficientRow
@@ -161,7 +178,6 @@ namespace MaxChemical.Modules.DOE.Services
                     }).ToList();
                 }
 
-                // 解析模型摘要
                 if (pyResult.ModelSummary != null)
                 {
                     result.ModelSummary = new OLSModelSummary
@@ -179,31 +195,46 @@ namespace MaxChemical.Modules.DOE.Services
                     };
                 }
 
-                _logger.LogInformation(" FitOLS 完成: R²={R2}, R²adj={R2adj}, R²pred={R2pred}",
-                    result.ModelSummary.RSquared, result.ModelSummary.RSquaredAdj, result.ModelSummary.RSquaredPred);
+                // ★ v7 新增: 解析不可估计项信息
+                result.DroppedTerms = pyResult.DroppedTerms ?? new();
+                result.InestimableWarning = pyResult.InestimableWarning ?? "";
+                result.OriginalModelType = pyResult.OriginalModelType ?? modelType;
+
+                if (result.DroppedTerms.Count > 0)
+                {
+                    _logger.LogWarning("FitOLS 自动剔除不可估计项: {Terms}", string.Join(", ", result.DroppedTerms));
+                }
+
+                _logger.LogInformation("FitOLS 完成: R²={R2}, R²adj={R2adj}, R²pred={R2pred}, Dropped={Dropped}",
+                    result.ModelSummary.RSquared, result.ModelSummary.RSquaredAdj,
+                    result.ModelSummary.RSquaredPred, result.DroppedTerms.Count);
 
                 return result;
             }
         }
+
         public async Task<OLSAnalysisResult> FitOlsCustomAsync(string batchId, string responseName, List<string> terms)
         {
             EnsureReady();
             await LoadBatchDataAsync(batchId, responseName);
 
             var termsJson = JsonConvert.SerializeObject(terms);
-            _logger.LogInformation("★ FitOLS Custom: batchId={BatchId}, response={Response}, terms={Terms}",
+            _logger.LogInformation("FitOLS Custom: batchId={BatchId}, response={Response}, terms={Terms}",
                 batchId, responseName, termsJson);
 
             using (Py.GIL())
             {
-                // 调用 Python: fit_ols("custom", terms_json)
                 string resultJson = _analyzer!.fit_ols("custom", termsJson).ToString();
                 var pyResult = JsonConvert.DeserializeObject<PythonOLSResult>(resultJson);
 
                 if (pyResult == null || pyResult.Error != null)
                 {
                     _logger.LogError("FitOLS Custom 失败: {Error}", pyResult?.Error ?? "未知错误");
-                    return new OLSAnalysisResult();
+                    return new OLSAnalysisResult
+                    {
+                        DroppedTerms = pyResult?.DroppedTerms ?? new(),
+                        InestimableWarning = pyResult?.InestimableWarning ?? ""
+                    };
                 }
 
                 var result = new OLSAnalysisResult();
@@ -251,23 +282,27 @@ namespace MaxChemical.Modules.DOE.Services
                     };
                 }
 
-                _logger.LogInformation("★ FitOLS Custom 完成: R²={R2}, R²adj={R2adj}, 项数={Terms}",
-                    result.ModelSummary.RSquared, result.ModelSummary.RSquaredAdj, result.Coefficients.Count);
+                // ★ v7
+                result.DroppedTerms = pyResult.DroppedTerms ?? new();
+                result.InestimableWarning = pyResult.InestimableWarning ?? "";
+                result.OriginalModelType = pyResult.OriginalModelType ?? "custom";
+
+                _logger.LogInformation("FitOLS Custom 完成: R²={R2}, R²adj={R2adj}, 项数={Terms}, Dropped={Dropped}",
+                    result.ModelSummary.RSquared, result.ModelSummary.RSquaredAdj,
+                    result.Coefficients.Count, result.DroppedTerms.Count);
 
                 return result;
             }
         }
+
         // ═══════════════════════════════════════════════════════
-        //  新增: 残差诊断四图
+        // 残差诊断四图
         // ═══════════════════════════════════════════════════════
 
         public async Task<string> GetResidualDiagnosticsAsync(string batchId, string responseName)
         {
             EnsureReady();
             await LoadBatchDataAsync(batchId, responseName);
-
-            _logger.LogInformation(" 残差诊断: batchId={BatchId}, response={Response}", batchId, responseName);
-
             using (Py.GIL())
             {
                 string resultJson = _analyzer!.residual_diagnostics().ToString();
@@ -276,17 +311,13 @@ namespace MaxChemical.Modules.DOE.Services
         }
 
         // ═══════════════════════════════════════════════════════
-        //  新增: 效应 Pareto 图（基于 T 值）
+        // 效应 Pareto 图
         // ═══════════════════════════════════════════════════════
 
         public async Task<string> GetEffectsParetoAsync(string batchId, string responseName, double alpha = 0.05)
         {
             EnsureReady();
             await LoadBatchDataAsync(batchId, responseName);
-
-            _logger.LogInformation(" 效应 Pareto: batchId={BatchId}, response={Response}, alpha={Alpha}",
-                batchId, responseName, alpha);
-
             using (Py.GIL())
             {
                 string resultJson = _analyzer!.effects_pareto(alpha).ToString();
@@ -295,7 +326,7 @@ namespace MaxChemical.Modules.DOE.Services
         }
 
         // ═══════════════════════════════════════════════════════
-        // ★ 新增 v5: 预测刻画器 + 最优化
+        // 预测刻画器 + 最优化
         // ═══════════════════════════════════════════════════════
 
         public async Task<string> GetPredictionProfilerAsync(string batchId, string responseName,
@@ -304,7 +335,6 @@ namespace MaxChemical.Modules.DOE.Services
             EnsureReady();
             await LoadBatchDataAsync(batchId, responseName);
 
-            // 确保模型已拟合
             using (Py.GIL())
             {
                 _analyzer!.fit_ols("quadratic");
@@ -331,6 +361,268 @@ namespace MaxChemical.Modules.DOE.Services
             }
         }
 
+        // ═══════════════════════════════════════════════════════
+        // ★ v7 新增: OLS 响应曲面 + 等高线
+        // ═══════════════════════════════════════════════════════
+
+        public async Task<string> GetOlsResponseSurfaceDataAsync(string batchId, string responseName,
+            string factor1, string factor2, int gridSize = 30)
+        {
+            EnsureReady();
+            await LoadBatchDataAsync(batchId, responseName);
+
+            var boundsJson = await BuildBoundsJsonAsync(batchId);
+
+            _logger.LogInformation("★ OLS 响应曲面: batch={BatchId}, factors={F1}×{F2}, grid={Grid}",
+                batchId, factor1, factor2, gridSize);
+
+            using (Py.GIL())
+            {
+                // 确保模型已拟合
+                _analyzer!.fit_ols("quadratic");
+                string resultJson = _analyzer!.response_surface_data_ols(factor1, factor2, gridSize, boundsJson).ToString();
+                return resultJson;
+            }
+        }
+
+        public async Task<byte[]> GetOlsResponseSurfaceImageAsync(string batchId, string responseName,
+            string factor1, string factor2)
+        {
+            EnsureReady();
+            await LoadBatchDataAsync(batchId, responseName);
+
+            var boundsJson = await BuildBoundsJsonAsync(batchId);
+
+            _logger.LogInformation("★ OLS 响应曲面图片: batch={BatchId}, factors={F1}×{F2}",
+                batchId, factor1, factor2);
+
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols("quadratic");
+                string base64 = _analyzer!.response_surface_image_ols(factor1, factor2, 50, 800, 600, boundsJson).ToString();
+                return string.IsNullOrEmpty(base64) ? Array.Empty<byte>() : Convert.FromBase64String(base64);
+            }
+        }
+
+        public async Task<string> GetOlsContourDataAsync(string batchId, string responseName,
+            string factor1, string factor2, int gridSize = 30)
+        {
+            EnsureReady();
+            await LoadBatchDataAsync(batchId, responseName);
+
+            var boundsJson = await BuildBoundsJsonAsync(batchId);
+
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols("quadratic");
+                string resultJson = _analyzer!.contour_data_ols(factor1, factor2, gridSize, boundsJson).ToString();
+                return resultJson;
+            }
+        }
+        // ── ★ v8: 异常点分析 ──
+
+        public async Task<string> GetOutlierAnalysisAsync(string batchId, string responseName)
+        {
+            EnsureReady();
+            await LoadBatchDataAsync(batchId, responseName);
+
+            _logger.LogInformation("★ v8 异常点分析: batch={BatchId}, response={Response}", batchId, responseName);
+
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols("quadratic");
+                string resultJson = _analyzer!.outlier_analysis().ToString();
+                return resultJson;
+            }
+        }
+
+        public async Task<OLSAnalysisResult> RefitExcludingAsync(string batchId, string responseName,
+            List<int> excludeIndices, string modelType = "quadratic")
+        {
+            EnsureReady();
+            await LoadBatchDataAsync(batchId, responseName);
+
+            var excludeJson = JsonConvert.SerializeObject(excludeIndices);
+            _logger.LogInformation("★ v8 排除重拟合: batch={BatchId}, exclude={Indices}", batchId, excludeJson);
+
+            using (Py.GIL())
+            {
+                string resultJson = _analyzer!.refit_excluding(excludeJson, modelType).ToString();
+                var pyResult = JsonConvert.DeserializeObject<PythonOLSResult>(resultJson);
+
+                if (pyResult == null || pyResult.Error != null)
+                {
+                    _logger.LogError("排除重拟合失败: {Error}", pyResult?.Error ?? "未知错误");
+                    return new OLSAnalysisResult();
+                }
+
+                var result = new OLSAnalysisResult();
+
+                if (pyResult.AnovaTable != null)
+                {
+                    result.AnovaTable = pyResult.AnovaTable.Select(row => new AnovaRow
+                    {
+                        Source = row.Source ?? "",
+                        DF = row.DF,
+                        SS = row.SS,
+                        MS = row.MS,
+                        FValue = row.FValue,
+                        PValue = row.PValue
+                    }).ToList();
+                }
+
+                if (pyResult.Coefficients != null)
+                {
+                    result.Coefficients = pyResult.Coefficients.Select(c => new CoefficientRow
+                    {
+                        Term = c.Term ?? "",
+                        Coefficient = c.Coeff,
+                        StdError = c.SE,
+                        TValue = c.TValue,
+                        PValue = c.PValue,
+                        VIF = c.VIF
+                    }).ToList();
+                }
+
+                if (pyResult.ModelSummary != null)
+                {
+                    result.ModelSummary = new OLSModelSummary
+                    {
+                        RSquared = pyResult.ModelSummary.RSquared,
+                        RSquaredAdj = pyResult.ModelSummary.RSquaredAdj,
+                        RSquaredPred = pyResult.ModelSummary.RSquaredPred,
+                        RMSE = pyResult.ModelSummary.RMSE,
+                        AdequatePrecision = pyResult.ModelSummary.AdequatePrecision,
+                        PRESS = pyResult.ModelSummary.PRESS,
+                        LackOfFitP = pyResult.ModelSummary.LackOfFitP,
+                        ModelP = pyResult.ModelSummary.ModelP,
+                        Equation = pyResult.ModelSummary.Equation ?? "",
+                        Equations = pyResult.ModelSummary.Equations
+                    };
+                }
+
+                result.DroppedTerms = pyResult.DroppedTerms ?? new();
+                result.InestimableWarning = pyResult.InestimableWarning ?? "";
+
+                _logger.LogInformation("★ v8 排除重拟合完成: R²={R2}, 排除={Excluded}组",
+                    result.ModelSummary.RSquared, excludeIndices.Count);
+
+                return result;
+            }
+        }
+
+        // ── ★ v8: Tukey HSD ──
+
+        public async Task<string> GetTukeyHSDAsync(string batchId, string responseName, string factorName = "")
+        {
+            EnsureReady();
+            await LoadBatchDataAsync(batchId, responseName);
+
+            _logger.LogInformation("★ v8 Tukey HSD: batch={BatchId}, response={Response}, factor={Factor}",
+                batchId, responseName, factorName);
+
+            using (Py.GIL())
+            {
+                string resultJson = _analyzer!.tukey_hsd(factorName).ToString();
+                return resultJson;
+            }
+        }
+
+        // ── ★ v8: 指定响应变量的主效应 / 交互效应 ──
+
+        public async Task<string> GetMainEffectsForResponseAsync(string batchId, string responseName)
+        {
+            EnsureReady();
+            await LoadBatchDataAsync(batchId, responseName);
+            using (Py.GIL()) { return _analyzer!.main_effects().ToString(); }
+        }
+
+        public async Task<string> GetInteractionEffectsForResponseAsync(string batchId, string responseName)
+        {
+            EnsureReady();
+            await LoadBatchDataAsync(batchId, responseName);
+            using (Py.GIL()) { return _analyzer!.interaction_effects().ToString(); }
+        }
+
+        public async Task<string> GetBoxCoxAnalysisAsync(string batchId, string responseName)
+        {
+            EnsureReady();
+            await LoadBatchDataAsync(batchId, responseName);
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols("quadratic");
+                string resultJson = _analyzer!.box_cox_analysis().ToString();
+                return resultJson;
+            }
+        }
+
+        public async Task<OLSAnalysisResult> ApplyBoxCoxAsync(string batchId, string responseName,
+            double lambdaValue, string modelType = "quadratic")
+        {
+            EnsureReady();
+            await LoadBatchDataAsync(batchId, responseName);
+            using (Py.GIL())
+            {
+                string resultJson = _analyzer!.apply_box_cox(lambdaValue, modelType).ToString();
+                var pyResult = JsonConvert.DeserializeObject<PythonOLSResult>(resultJson);
+
+                if (pyResult == null || pyResult.Error != null)
+                    return new OLSAnalysisResult();
+
+                var result = new OLSAnalysisResult();
+                // 与 FitOlsAsync 相同的解析逻辑
+                if (pyResult.AnovaTable != null)
+                    result.AnovaTable = pyResult.AnovaTable.Select(row => new AnovaRow
+                    {
+                        Source = row.Source ?? "",
+                        DF = row.DF,
+                        SS = row.SS,
+                        MS = row.MS,
+                        FValue = row.FValue,
+                        PValue = row.PValue
+                    }).ToList();
+                if (pyResult.Coefficients != null)
+                    result.Coefficients = pyResult.Coefficients.Select(c => new CoefficientRow
+                    {
+                        Term = c.Term ?? "",
+                        Coefficient = c.Coeff,
+                        StdError = c.SE,
+                        TValue = c.TValue,
+                        PValue = c.PValue,
+                        VIF = c.VIF
+                    }).ToList();
+                if (pyResult.ModelSummary != null)
+                    result.ModelSummary = new OLSModelSummary
+                    {
+                        RSquared = pyResult.ModelSummary.RSquared,
+                        RSquaredAdj = pyResult.ModelSummary.RSquaredAdj,
+                        RSquaredPred = pyResult.ModelSummary.RSquaredPred,
+                        RMSE = pyResult.ModelSummary.RMSE,
+                        AdequatePrecision = pyResult.ModelSummary.AdequatePrecision,
+                        PRESS = pyResult.ModelSummary.PRESS,
+                        LackOfFitP = pyResult.ModelSummary.LackOfFitP,
+                        ModelP = pyResult.ModelSummary.ModelP,
+                        Equation = pyResult.ModelSummary.Equation ?? "",
+                        Equations = pyResult.ModelSummary.Equations
+                    };
+                result.DroppedTerms = pyResult.DroppedTerms ?? new();
+                result.InestimableWarning = pyResult.InestimableWarning ?? "";
+                return result;
+            }
+        }
+
+        public async Task<string> ExportOlsReportAsync(string batchId, string responseName,
+            string outputPath, string title = "OLS 回归分析报告")
+        {
+            EnsureReady();
+            await LoadBatchDataAsync(batchId, responseName);
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols("quadratic");
+                string resultJson = _analyzer!.export_ols_report(outputPath, title).ToString();
+                return resultJson;
+            }
+        }
         // ═══════════════════════════════════════════════════════
         // 原有方法（保留不变）
         // ═══════════════════════════════════════════════════════
@@ -470,8 +762,6 @@ namespace MaxChemical.Modules.DOE.Services
             var batch = await _repository.GetBatchWithDetailsAsync(batchId);
             if (batch == null) return;
 
-            // ★ 修复 (Bug#3): 区分连续因子 [lower, upper] 和类别因子 ["A", "B", "C"]
-            // 原来的 bug: 所有因子都用 [LowerBound, UpperBound]，类别因子的 0/0 会导致绘图范围错误
             var boundsDict = new Dictionary<string, object>();
             foreach (var f in batch.Factors)
             {
@@ -497,7 +787,7 @@ namespace MaxChemical.Modules.DOE.Services
             }
         }
 
-        // ──  新增: Python 结果反序列化类 ──
+        // ── Python 结果反序列化类 ──
 
         private class PythonOLSResult
         {
@@ -505,6 +795,11 @@ namespace MaxChemical.Modules.DOE.Services
             [JsonProperty("anova_table")] public List<PyAnovaRow>? AnovaTable { get; set; }
             [JsonProperty("coefficients")] public List<PyCoeffRow>? Coefficients { get; set; }
             [JsonProperty("model_summary")] public PyModelSummary? ModelSummary { get; set; }
+
+            // ★ v7 新增
+            [JsonProperty("dropped_terms")] public List<string>? DroppedTerms { get; set; }
+            [JsonProperty("inestimable_warning")] public string? InestimableWarning { get; set; }
+            [JsonProperty("original_model_type")] public string? OriginalModelType { get; set; }
         }
 
         private class PyAnovaRow
@@ -538,7 +833,6 @@ namespace MaxChemical.Modules.DOE.Services
             [JsonProperty("lack_of_fit_p")] public double? LackOfFitP { get; set; }
             [JsonProperty("model_p")] public double? ModelP { get; set; }
             [JsonProperty("equation")] public string? Equation { get; set; }
-
             [JsonProperty("equations")] public EquationsInfo? Equations { get; set; }
         }
     }

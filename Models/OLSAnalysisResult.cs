@@ -4,9 +4,11 @@ using System.Collections.Generic;
 namespace MaxChemical.Modules.DOE.Models
 {
     /// <summary>
-    ///  新增: OLS 回归分析完整结果
+    /// OLS 回归分析完整结果
     /// 由 Python DOEAnalyzer.fit_ols() 返回，C# 侧解析展示
     /// 对标 JMP/Minitab 的分析报表格式
+    /// 
+    /// ★ v7 新增: DroppedTerms / InestimableWarning / OriginalModelType
     /// </summary>
     public class OLSAnalysisResult
     {
@@ -24,10 +26,31 @@ namespace MaxChemical.Modules.DOE.Models
         /// 模型摘要统计
         /// </summary>
         public OLSModelSummary ModelSummary { get; set; } = new();
+
+        /// <summary>
+        /// ★ v7 新增: 因数据不足或共线性被自动剔除的模型项列表
+        /// 如 ["温度²", "温度×压力"]
+        /// 空列表表示所有请求的项均可估计
+        /// </summary>
+        public List<string> DroppedTerms { get; set; } = new();
+
+        /// <summary>
+        /// ★ v7 新增: 不可估计项警告信息（人类可读）
+        /// 如 "以下项因数据不足或共线性被自动剔除: 温度², 温度×压力"
+        /// 空字符串表示无警告
+        /// </summary>
+        public string InestimableWarning { get; set; } = string.Empty;
+
+        /// <summary>
+        /// ★ v7 新增: 用户请求的原始模型类型
+        /// 如用户请求 "quadratic" 但因数据不足被降阶为 "linear"，
+        /// 此字段记录原始请求 "quadratic"，实际拟合的模型从系数表推断
+        /// </summary>
+        public string OriginalModelType { get; set; } = string.Empty;
     }
 
     /// <summary>
-    ///  新增: ANOVA 表行
+    /// ANOVA 表行
     /// 
     /// ANOVA 分解原理:
     ///   SS_Total = SS_Model + SS_Residual
@@ -68,7 +91,7 @@ namespace MaxChemical.Modules.DOE.Models
     }
 
     /// <summary>
-    ///  新增: 回归系数表行
+    /// 回归系数表行
     /// 
     /// 每一行对应模型中的一个项（截距、主效应、交互项、二次项）
     /// </summary>
@@ -107,7 +130,7 @@ namespace MaxChemical.Modules.DOE.Models
     }
 
     /// <summary>
-    ///  新增: OLS 模型摘要
+    /// OLS 模型摘要
     /// </summary>
     public class OLSModelSummary
     {
@@ -166,31 +189,13 @@ namespace MaxChemical.Modules.DOE.Models
         public string Equation { get; set; } = string.Empty;
 
         /// <summary>
-        /// ★ 新增 v4: Minitab 风格方程 — 按类别因子水平展开
-        /// 
-        /// 当模型包含类别因子时:
-        /// {
-        ///   "has_categorical": true,
-        ///   "categorical_factor": "催化剂",
-        ///   "equations": {
-        ///     "A": "产率 = -68.1 + 1.494×温度 + ...",
-        ///     "B": "产率 = -76.4 + 1.552×温度 + ...",
-        ///     "C": "产率 = -66.0 + 1.510×温度 + ..."
-        ///   },
-        ///   "common_equation": "产率 = 85.2 + 12.3×温度 + ... (含哑变量项)"
-        /// }
-        /// 
-        /// 无类别因子时:
-        /// {
-        ///   "has_categorical": false,
-        ///   "equations": {"全部": "产率 = 85.2 + 12.3×温度 + ..."},
-        ///   "common_equation": "产率 = 85.2 + 12.3×温度 + ..."
-        /// }
+        /// ★ v4: Minitab 风格方程 — 按类别因子水平展开
         /// </summary>
         public EquationsInfo? Equations { get; set; }
     }
+
     /// <summary>
-    /// ★ 新增 v4: Minitab 风格方程展示信息
+    /// ★ v4: Minitab 风格方程展示信息
     /// </summary>
     public class EquationsInfo
     {
@@ -206,5 +211,4 @@ namespace MaxChemical.Modules.DOE.Models
         [JsonProperty("common_equation")]
         public string CommonEquation { get; set; } = string.Empty;
     }
-
 }

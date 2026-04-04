@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("MaxChemical.Modules.DOE")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+e7cff6e4fa107cb87b38529afb9b2e9f3c03663d")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+bdd048b5b971ccba29beeb704573ee06d36d76ad")]
 [assembly: System.Reflection.AssemblyProductAttribute("MaxChemical.Modules.DOE")]
 [assembly: System.Reflection.AssemblyTitleAttribute("MaxChemical.Modules.DOE")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

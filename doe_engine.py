@@ -1430,6 +1430,13 @@ class DOEAnalyzer:
                     raise np.linalg.LinAlgError(
                         f"Rank deficient: rank={actual_rank} < params={n_params}, "
                         f"模型矩阵存在共线性列，需要剔除不可估计项")
+                # ★ v10: SVD 奇异值比值兜底（兼容不同 numpy 版本的 matrix_rank 容差差异）
+                svd_vals = np.linalg.svd(X_exog, compute_uv=False)
+                sv_ratio = svd_vals[-1] / svd_vals[0] if svd_vals[0] > 0 else 0
+                if sv_ratio < 1e-12:
+                    raise np.linalg.LinAlgError(
+                        f"Near-singular design matrix: min/max singular value ratio = {sv_ratio:.2e}, "
+                        f"存在不可估计项（类似 Minitab 的秩亏检测）")
                 # ★ v7 增强: 检查 Inf/NaN SE（标准误为无穷大表示该项不可估计）
                 inf_se_params = [model.params.index[i] for i in range(len(model.bse))
                                  if np.isinf(model.bse.iloc[i]) or np.isnan(model.bse.iloc[i])]
@@ -1704,28 +1711,26 @@ class DOEAnalyzer:
                                       safe_continuous: list, safe_categorical: list,
                                       model_type: str) -> tuple:
         """
-        ★ v7 新增: 检测并剔除不可估计的模型项
+        ★ v10 重写: 精确检测并剔除不可估计的模型项
 
-        策略:
-          1. 从完整公式中提取所有项
-          2. 构建模型矩阵 X，计算 rank(X)
-          3. 如果 rank < 列数，逐列检查哪些列可以被其他列线性表出
-          4. 从高阶项开始剔除（先二次 → 再交互 → 最后主效应）
-          5. 重构公式返回
+        策略（对标 Minitab）:
+          1. 拟合当前公式，检查 NaN 参数和 SVD 近奇异
+          2. 如果近奇异: 逐项试删，找到删掉后 SVD ratio 恢复最大的那一项
+          3. 在同等 SVD 改善下，优先剔除高阶项（二次 > 交互 > 主效应）
+          4. 剔除后重复检查，直到矩阵满秩
 
         返回: (new_formula, dropped_term_names)
         """
-        import re
 
-        # 提取公式右侧的项
         rhs = formula.split("~")[1].strip() if "~" in formula else ""
         if not rhs or rhs == "1":
             return formula, []
 
-        terms = [t.strip() for t in rhs.split("+")]
+        current_terms = [t.strip() for t in rhs.split("+")]
+        dropped = []
 
-        # 按阶次排序: 二次项 > 交互项 > 类别×连续 > 主效应（优先剔除高阶项）
-        def term_order(t):
+        def _term_order(t):
+            """项的阶次: 值越大越优先被剔除"""
             if "**2" in t:
                 return 3  # 二次项
             elif ":" in t:
@@ -1735,58 +1740,117 @@ class DOEAnalyzer:
             else:
                 return 1  # 连续主效应
 
-        terms_sorted_for_drop = sorted(terms, key=term_order, reverse=True)
-
-        dropped = []
-        current_terms = list(terms)
-
-        # 反复尝试: 每次剔除一个造成秩亏的高阶项
-        max_attempts = len(terms)
-        for attempt in range(max_attempts):
-            current_formula = "Y ~ " + " + ".join(current_terms) if current_terms else "Y ~ 1"
+        def _check_singular(terms_list):
+            """检查公式是否近奇异，返回 (is_singular, sv_ratio, nan_params, model)"""
+            if not terms_list:
+                return True, 0, [], None
+            f = "Y ~ " + " + ".join(terms_list)
             try:
-                test_model = ols(current_formula, data=df_safe).fit()
-                # 检查 NaN 系数
-                nan_params = [p for p in test_model.params.index if np.isnan(test_model.params[p])]
-                if not nan_params:
-                    # 拟合成功，无 NaN — 当前公式可用
-                    break
-                else:
-                    # 有 NaN 系数: 找到对应的公式项并剔除
-                    for nan_p in nan_params:
-                        # nan_p 是 statsmodels 的参数名（如 "I(X0 ** 2)", "X0:X1"）
-                        if nan_p in current_terms:
-                            current_terms.remove(nan_p)
-                            display = self._restore_term_name(nan_p, reverse_names)
-                            dropped.append(display)
-                            break
-                    else:
-                        # NaN 参数名不在 current_terms 中（可能是哑变量展开名），
-                        # 从最高阶项开始剔除
-                        removed = False
-                        for t in terms_sorted_for_drop:
-                            if t in current_terms:
-                                current_terms.remove(t)
-                                display = self._restore_term_name(t, reverse_names)
-                                dropped.append(display)
-                                removed = True
-                                terms_sorted_for_drop.remove(t)
-                                break
-                        if not removed:
-                            break
+                m = ols(f, data=df_safe).fit()
+                nans = [p for p in m.params.index if np.isnan(m.params[p])]
+                if nans:
+                    return True, 0, nans, m
+                X = m.model.exog
+                svd = np.linalg.svd(X, compute_uv=False)
+                ratio = svd[-1] / svd[0] if svd[0] > 0 else 0
+                return ratio < 1e-12, ratio, [], m
             except Exception:
-                # 拟合失败 — 从最高阶项开始剔除
+                return True, 0, [], None
+
+        max_attempts = len(current_terms)
+        for attempt in range(max_attempts):
+            is_singular, sv_ratio, nan_params, test_model = _check_singular(current_terms)
+
+            if not is_singular:
+                break  # 满秩，结束
+
+            if nan_params:
+                # 有 NaN 参数: 直接定位对应的公式项
                 removed = False
-                for t in terms_sorted_for_drop:
-                    if t in current_terms:
-                        current_terms.remove(t)
-                        display = self._restore_term_name(t, reverse_names)
-                        dropped.append(display)
+                for nan_p in nan_params:
+                    if nan_p in current_terms:
+                        current_terms.remove(nan_p)
+                        dropped.append(self._restore_term_name(nan_p, reverse_names))
                         removed = True
-                        terms_sorted_for_drop.remove(t)
                         break
                 if not removed:
-                    break
+                    # NaN 参数名不在 current_terms（哑变量展开名），
+                    # 找包含该哑变量的公式项
+                    for nan_p in nan_params:
+                        for t in current_terms:
+                            if t in nan_p or nan_p.startswith(t.replace("C(", "").replace(")", "")):
+                                current_terms.remove(t)
+                                dropped.append(self._restore_term_name(t, reverse_names))
+                                removed = True
+                                break
+                        if removed:
+                            break
+                    if not removed:
+                        # 兜底: 按阶次删最高阶项
+                        sorted_terms = sorted(current_terms, key=_term_order, reverse=True)
+                        if sorted_terms:
+                            t = sorted_terms[0]
+                            current_terms.remove(t)
+                            dropped.append(self._restore_term_name(t, reverse_names))
+                        else:
+                            break
+            else:
+                # ★ v10 核心: 无 NaN 但近奇异 — 逐项试删，精确定位
+                # 选择标准（优先级从高到低，纯线性代数，不依赖响应值）:
+                #   1. 删掉后 sv_ratio 恢复最大（矩阵最健康）
+                #   2. sv_ratio 相同时，优先删高阶项（二次 > 交互 > 主效应）
+                #   3. 阶次也相同时，优先删展开后哑变量列数最多的项（自由度成本最大）
+                #   4. 以上全相同时，删公式中靠后的项（与 Minitab 行为一致）
+                best_term = None
+                best_ratio = -1
+                best_order = -1
+                best_dummy_count = -1
+                best_position = -1  # 在公式中的位置（越大 = 越靠后 = 越优先删）
+
+                for idx_t, t in enumerate(current_terms):
+                    trial = [x for x in current_terms if x != t]
+                    if not trial:
+                        continue
+                    _, ratio_after, _, _ = _check_singular(trial)
+                    order = _term_order(t)
+                    # 估算该项展开后的哑变量列数
+                    dummy_count = 1
+                    if "C(" in t and ":" in t:
+                        # 类别×连续交互: 哑变量数 = 类别因子水平数 - 1
+                        dummy_count = 2  # 默认估计
+                        for cat_name in safe_categorical:
+                            if cat_name in t:
+                                n_levels = df_safe[cat_name].nunique()
+                                dummy_count = max(n_levels - 1, 1)
+                                break
+
+                    if (ratio_after > best_ratio + 1e-6):
+                        best_ratio = ratio_after
+                        best_term = t
+                        best_order = order
+                        best_dummy_count = dummy_count
+                        best_position = idx_t
+                    elif abs(ratio_after - best_ratio) < 1e-6:
+                        # sv_ratio 相同: 按阶次 > 哑变量列数 > 位置
+                        if order > best_order:
+                            best_term = t
+                            best_order = order
+                            best_dummy_count = dummy_count
+                            best_position = idx_t
+                        elif order == best_order:
+                            if dummy_count > best_dummy_count:
+                                best_term = t
+                                best_dummy_count = dummy_count
+                                best_position = idx_t
+                            elif dummy_count == best_dummy_count and idx_t > best_position:
+                                best_term = t
+                                best_position = idx_t
+
+                if best_term is not None:
+                    current_terms.remove(best_term)
+                    dropped.append(self._restore_term_name(best_term, reverse_names))
+                else:
+                    break  # 无法改善
 
         final_formula = "Y ~ " + " + ".join(current_terms) if current_terms else "Y ~ 1"
         return final_formula, dropped
@@ -3461,6 +3525,11 @@ class DOEAnalyzer:
                 X_exog = self._model.model.exog
                 if np.linalg.matrix_rank(X_exog) < X_exog.shape[1]:
                     raise np.linalg.LinAlgError("Rank deficient in auto-fit")
+                # ★ v10: SVD 奇异值比值兜底
+                svd_vals = np.linalg.svd(X_exog, compute_uv=False)
+                sv_ratio = svd_vals[-1] / svd_vals[0] if svd_vals[0] > 0 else 0
+                if sv_ratio < 1e-12:
+                    raise np.linalg.LinAlgError("Near-singular in auto-fit")
                 if self._model.df_resid <= 0:
                     raise np.linalg.LinAlgError("df_resid <= 0 in auto-fit")
             except Exception:

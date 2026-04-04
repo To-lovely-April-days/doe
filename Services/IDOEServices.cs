@@ -259,6 +259,39 @@ namespace MaxChemical.Modules.DOE.Services
         Task<string> ExportOlsReportAsync(string batchId, string responseName, string outputPath,
             string title = "OLS 回归分析报告");
 
+        // ═══ 新增: 直接数据导入 OLS 分析（不依赖批次） ═══
+
+        /// <summary>
+        /// 直接用因子+响应数据做 OLS 分析，不依赖 DOE 批次
+        /// </summary>
+        /// <param name="factorsData">每组实验的因子值列表</param>
+        /// <param name="responsesData">对应的响应值列表</param>
+        /// <param name="responseName">响应变量名称</param>
+        /// <param name="factorTypes">因子类型 (continuous/categorical)，可选</param>
+        /// <param name="modelType">模型类型，默认 quadratic</param>
+        Task<OLSAnalysisResult> FitOlsDirectAsync(
+            List<Dictionary<string, object>> factorsData,
+            List<double> responsesData,
+            string responseName,
+            Dictionary<string, string>? factorTypes = null,
+            string modelType = "quadratic");
+
+        /// <summary>直接模式下获取 Pareto（analyzer 已有数据和模型）</summary>
+        string GetEffectsParetoDirectAsync(string responseName, double alpha = 0.05);
+
+        /// <summary>直接模式下获取残差诊断（analyzer 已有数据和模型）</summary>
+        string GetResidualDiagnosticsDirectAsync(string responseName);
+     
+        string GetMainEffectsDirectAsync(string responseName);
+        string GetInteractionEffectsDirectAsync(string responseName);
+        string GetOutlierAnalysisDirectAsync(string responseName);
+        string GetBoxCoxAnalysisDirectAsync(string responseName);
+        string GetOlsSurfaceDataDirectAsync(string factor1, string factor2, string boundsJson, int gridSize = 30);
+        byte[] GetOlsSurfaceImageDirectAsync(string factor1, string factor2, string boundsJson);
+        string GetOlsContourDataDirectAsync(string factor1, string factor2, string boundsJson, int gridSize = 30);
+        string GetPredictionProfilerDirectAsync(string responseName, int gridSize = 50, string fixedValuesJson = "");
+        string FindOptimalDirectAsync(string responseName, bool maximize = true);
+        string GetTukeyHSDDirectAsync(string responseName, string categoricalFactorName);
     }
 
     // ═══════════════════════════════════════════════════════

@@ -144,7 +144,17 @@ namespace MaxChemical.Modules.DOE.ViewModels
         public ObservableCollection<StopConditionViewModel> StopConditions { get => _stopConditions; set => SetProperty(ref _stopConditions, value); }
 
         // Step5
-        public string? ImportFilePath { get => _importFilePath; set => SetProperty(ref _importFilePath, value); }
+        public string? ImportFilePath
+        {
+            get => _importFilePath;
+            set
+            {
+                if (SetProperty(ref _importFilePath, value))
+                {
+                    ValidateImportCommand.RaiseCanExecuteChanged();
+                }
+            }
+        }
         public DataValidationResult? ValidationResult { get => _validationResult; set => SetProperty(ref _validationResult, value); }
         public int ImportedDataCount { get => _importedDataCount; set => SetProperty(ref _importedDataCount, value); }
 

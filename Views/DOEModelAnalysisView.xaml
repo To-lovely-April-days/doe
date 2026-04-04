@@ -387,14 +387,46 @@
                             <Grid>
                                 <TextBlock Text="选择实验批次进行 OLS 回归分析" FontSize="12" FontWeight="SemiBold" Foreground="#1565C0" VerticalAlignment="Center"/>
                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                    <!-- ★ 新增: 导入 Excel 直接分析按钮 -->
+                                    <Button Content="📂 导入 Excel 分析" Command="{Binding OlsImportExcelCommand}"
+                    Padding="10,4" FontSize="11" Cursor="Hand" Margin="0,0,12,0"
+                    ToolTip="导入外部 Excel 数据直接进行 OLS 回归分析（无需创建 DOE 批次）">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border x:Name="Bd" CornerRadius="6" Padding="{TemplateBinding Padding}"
+                                Background="#E8F5E9" BorderBrush="#4CAF50" BorderThickness="1">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="Bd" Property="Background" Value="#C8E6C9"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                    </Button>
                                     <TextBlock Text="分析响应:" VerticalAlignment="Center" FontSize="11" Foreground="#7F8C8D" Margin="0,0,6,0"/>
                                     <ComboBox ItemsSource="{Binding ResponseNames}" SelectedItem="{Binding SelectedResponseName}" Width="120" FontSize="11"/>
-                                    <!-- ★ v9: 导出报告按钮 -->
                                     <Button Content="导出报告" Command="{Binding ExportReportCommand}"
-                                            Padding="10,4" FontSize="11" Background="#E3F2FD" BorderBrush="#42A5F5" Cursor="Hand"
-                                            Margin="12,0,0,0" ToolTip="将当前 OLS 分析结果导出为 Word 报告"/>
+                    Padding="10,4" FontSize="11" Background="#E3F2FD" BorderBrush="#42A5F5" Cursor="Hand"
+                    Margin="12,0,0,0" ToolTip="将当前 OLS 分析结果导出为 Word 报告"/>
                                 </StackPanel>
                             </Grid>
+                        </Border>
+                        <!-- ★ 新增: 直接导入模式提示 -->
+                        <Border Padding="12,10" Background="#F1F8E9" BorderBrush="#AED581" BorderThickness="1"
+        CornerRadius="8" Margin="8,8,8,0"
+        Visibility="{Binding IsDirectImportMode, Converter={StaticResource BoolToVis}}">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="📊" FontSize="16" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <StackPanel>
+                                    <TextBlock FontSize="12" FontWeight="SemiBold" Foreground="#33691E">
+                <Run Text="直接导入模式 — 数据来自: "/>
+                <Run Text="{Binding DirectImportFilePath, Mode=OneWay}"/>
+                                    </TextBlock>
+                                    <TextBlock Text="已绕过 DOE 批次，直接用导入数据进行 OLS 分析" FontSize="10" Foreground="#689F38" Margin="0,2,0,0"/>
+                                </StackPanel>
+                            </StackPanel>
                         </Border>
                         <ItemsControl ItemsSource="{Binding OlsBatchItems}" Margin="8">
                             <ItemsControl.ItemTemplate>

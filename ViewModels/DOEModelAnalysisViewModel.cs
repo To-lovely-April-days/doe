@@ -13,6 +13,7 @@ using OxyPlot.Legends;
 using OxyPlot.Series;
 using Prism.Commands;
 using Prism.Mvvm;
+using Python.Runtime;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -229,6 +230,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
         private OlsBatchItem? _selectedOlsBatch;
         private List<string> _responseNames = new();
         private string _selectedResponseName = "";
+
         private OLSAnalysisResult? _olsResult;
         private string _olsStatusText = "切换到此页后将自动加载可分析的批次列表";
 
@@ -367,6 +369,31 @@ namespace MaxChemical.Modules.DOE.ViewModels
         private double _paretoAlpha = 0.05;
         private string _currentEquationText = "";
         public string CurrentEquationText { get => _currentEquationText; set => SetProperty(ref _currentEquationText, value); }
+
+        // ── OLS 直接导入 (不依赖批次) ──
+        private bool _isDirectImportMode;
+        private string _directImportFilePath = "";
+        private List<string> _directImportFactorNames = new();
+        private List<string> _directImportResponseNames = new();
+        private Dictionary<string, string> _directImportFactorTypes = new();
+        private List<Dictionary<string, object>> _directImportFactorsData = new();
+        private Dictionary<string, List<double>> _directImportResponsesData = new();
+        /// <summary>是否处于直接导入模式（非批次模式）</summary>
+        public bool IsDirectImportMode
+        {
+            get => _isDirectImportMode;
+            set { SetProperty(ref _isDirectImportMode, value); RaisePropertyChanged(nameof(ShowDirectImportPanel)); }
+        }
+
+        /// <summary>直接导入的文件路径</summary>
+        public string DirectImportFilePath
+        {
+            get => _directImportFilePath;
+            set => SetProperty(ref _directImportFilePath, value);
+        }
+
+        /// <summary>是否显示直接导入面板（始终显示）</summary>
+        public bool ShowDirectImportPanel => true;
         // ── Commands ──
         public DelegateCommand RefitReducedModelCommand { get; }
         public DelegateCommand RestoreFullModelCommand { get; }
@@ -381,6 +408,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
         public DelegateCommand ExportReportCommand { get; }
         // 声明:
         public DelegateCommand ToggleEquationCodingCommand { get; }
+        public DelegateCommand OlsImportExcelCommand { get; }
         public DOEModelAnalysisViewModel(
             IGPRModelService gprService, IDOEAnalysisService analysisService,
             IDOERepository repository, IFlowParameterProvider paramProvider,
@@ -423,6 +451,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
             ApplyBoxCoxCommand = new DelegateCommand(async () => await ApplyBoxCoxAsync());
             ExportReportCommand = new DelegateCommand(async () => await ExportOlsReportAsync());
             ToggleEquationCodingCommand = new DelegateCommand(() => IsCodedEquation = !IsCodedEquation);
+            OlsImportExcelCommand = new DelegateCommand(async () => await OlsImportExcelAsync());
         }
 
         // ══════════════ Properties — GPR ══════════════
@@ -468,7 +497,16 @@ namespace MaxChemical.Modules.DOE.ViewModels
         public string SelectedResponseName
         {
             get => _selectedResponseName;
-            set { if (SetProperty(ref _selectedResponseName, value) && IsOlsTabSelected && SelectedOlsBatch != null) _ = RefreshOlsAnalysisAsync(); }
+            set
+            {
+                if (SetProperty(ref _selectedResponseName, value) && IsOlsTabSelected)
+                {
+                    if (IsDirectImportMode)
+                        _ = RunDirectOlsAnalysisAsync();  // ★ 直接导入模式下切换响应
+                    else if (SelectedOlsBatch != null)
+                        _ = RefreshOlsAnalysisAsync();
+                }
+            }
         }
         public OLSAnalysisResult? OlsResult { get => _olsResult; set { SetProperty(ref _olsResult, value); RaisePropertyChanged(nameof(HasOlsResult)); } }
         public string OlsStatusText { get => _olsStatusText; set => SetProperty(ref _olsStatusText, value); }
@@ -1422,22 +1460,34 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
         private async Task LoadPredictionProfilerAsync()
         {
-            if (SelectedOlsBatch == null || string.IsNullOrEmpty(_selectedResponseName)) return;
+            if (string.IsNullOrEmpty(_selectedResponseName)) return;
+
+            // ★ 直接导入模式和批次模式都要支持
+            if (!IsDirectImportMode && SelectedOlsBatch == null) return;
 
             try
             {
                 IsLoading = true;
                 OlsStatusText = "正在生成预测刻画器...";
 
-                var json = await _analysisService.GetPredictionProfilerAsync(
-                    SelectedOlsBatch.BatchId, _selectedResponseName);
+                string json;
+                if (IsDirectImportMode)
+                {
+                    json = await Task.Run(() =>
+                        _analysisService.GetPredictionProfilerDirectAsync(_selectedResponseName));
+                }
+                else
+                {
+                    json = await _analysisService.GetPredictionProfilerAsync(
+                        SelectedOlsBatch!.BatchId, _selectedResponseName);
+                }
+
                 var data = JsonConvert.DeserializeObject<ProfilerResult>(json);
                 if (data?.Factors == null) return;
 
                 _lastProfilerData = data;
                 _profilerFactorOrder = data.Factors.Keys.ToList();
 
-                // 初始化当前值（中心值）
                 _profilerCurrentValues.Clear();
                 foreach (var kv in data.Factors)
                     _profilerCurrentValues[kv.Key] = kv.Value.CurrentValue ?? 0;
@@ -1460,15 +1510,29 @@ namespace MaxChemical.Modules.DOE.ViewModels
         /// </summary>
         public async Task UpdateProfilerValueAsync(string factorName, object newValue)
         {
-            if (!IsProfilerLoaded || SelectedOlsBatch == null) return;
+            if (!IsProfilerLoaded) return;
+            if (!IsDirectImportMode && SelectedOlsBatch == null) return;
 
             _profilerCurrentValues[factorName] = newValue;
 
             try
             {
                 var fixedValues = new Dictionary<string, object>(_profilerCurrentValues);
-                var json = await _analysisService.GetPredictionProfilerAsync(
-                    SelectedOlsBatch.BatchId, _selectedResponseName, 50, fixedValues);
+                string json;
+
+                if (IsDirectImportMode)
+                {
+                    var fixedJson = JsonConvert.SerializeObject(fixedValues);
+                    json = await Task.Run(() =>
+                        _analysisService.GetPredictionProfilerDirectAsync(
+                            _selectedResponseName, 50, fixedJson));
+                }
+                else
+                {
+                    json = await _analysisService.GetPredictionProfilerAsync(
+                        SelectedOlsBatch!.BatchId, _selectedResponseName, 50, fixedValues);
+                }
+
                 var data = JsonConvert.DeserializeObject<ProfilerResult>(json);
                 if (data?.Factors == null) return;
 
@@ -1476,9 +1540,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 foreach (var kv in data.Factors)
                     _profilerCurrentValues[kv.Key] = kv.Value.CurrentValue ?? _profilerCurrentValues[kv.Key];
 
-                // ★ 原地更新每个 PlotModel（不替换 ProfilerPlots 列表）
                 UpdateProfilerPlotsInPlace(data, factorName);
-
                 ProfilerCurrentPredicted = $"{data.ResponseName}    {data.CurrentPredicted:F4}";
             }
             catch (Exception ex)
@@ -1981,15 +2043,26 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
         private async Task FindOlsOptimalAsync(bool maximize)
         {
-            if (SelectedOlsBatch == null || string.IsNullOrEmpty(_selectedResponseName)) return;
+            if (string.IsNullOrEmpty(_selectedResponseName)) return;
+            if (!IsDirectImportMode && SelectedOlsBatch == null) return;
 
             try
             {
                 IsLoading = true;
                 OlsStatusText = maximize ? "正在搜索最大值..." : "正在搜索最小值...";
 
-                var json = await _analysisService.FindOptimalAsync(
-                    SelectedOlsBatch.BatchId, _selectedResponseName, maximize);
+                string json;
+                if (IsDirectImportMode)
+                {
+                    json = await Task.Run(() =>
+                        _analysisService.FindOptimalDirectAsync(_selectedResponseName, maximize));
+                }
+                else
+                {
+                    json = await _analysisService.FindOptimalAsync(
+                        SelectedOlsBatch!.BatchId, _selectedResponseName, maximize);
+                }
+
                 var data = JsonConvert.DeserializeObject<OptimalResult>(json);
 
                 if (data?.Success == true)
@@ -2005,14 +2078,25 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     // 用最优条件刷新 profiler（如果已加载）
                     if (IsProfilerLoaded)
                     {
-                        // 更新 currentValues
                         foreach (var kv in data.OptimalFactors)
                             _profilerCurrentValues[kv.Key] = kv.Value;
 
                         try
                         {
-                            var profilerJson = await _analysisService.GetPredictionProfilerAsync(
-                                SelectedOlsBatch.BatchId, _selectedResponseName, 50, data.OptimalFactors);
+                            string profilerJson;
+                            if (IsDirectImportMode)
+                            {
+                                var fixedJson = JsonConvert.SerializeObject(data.OptimalFactors);
+                                profilerJson = await Task.Run(() =>
+                                    _analysisService.GetPredictionProfilerDirectAsync(
+                                        _selectedResponseName, 50, fixedJson));
+                            }
+                            else
+                            {
+                                profilerJson = await _analysisService.GetPredictionProfilerAsync(
+                                    SelectedOlsBatch!.BatchId, _selectedResponseName, 50, data.OptimalFactors);
+                            }
+
                             var profData = JsonConvert.DeserializeObject<ProfilerResult>(profilerJson);
                             if (profData?.Factors != null)
                             {
@@ -2345,6 +2429,841 @@ namespace MaxChemical.Modules.DOE.ViewModels
             if (string.IsNullOrEmpty(json)) return new();
             try { var records = JsonConvert.DeserializeObject<List<TrainingDataRecord>>(json); return records?.Where(r => r.Factors != null).Select(r => new TrainingDataPoint { Factors = r.Factors!, Response = r.Response }).ToList() ?? new(); }
             catch { return new(); }
+        }
+
+        // ══════════════ OLS 直接导入 Excel 数据分析 ══════════════
+
+        /// <summary>
+        /// ★ 新增: 在 OLS Tab 直接导入 Excel 做分析，不依赖任何 DOE 批次
+        /// Excel 格式: 第一行列头 = 因子名 + 响应名，后续行为数据
+        /// 自动检测: 最后一列或多列为纯数值 → 响应变量；其他列 → 因子
+        /// </summary>
+        private async Task OlsImportExcelAsync()
+        {
+            try
+            {
+                var path = _dialogService.ShowOpenFileDialog("Excel 文件 (*.xlsx)|*.xlsx");
+                if (string.IsNullOrEmpty(path)) return;
+
+                IsLoading = true;
+                OlsStatusText = "正在读取 Excel 文件...";
+
+                // Step 1: 后台读取原始数据
+                var rawData = await Task.Run(() => ReadExcelRawData(path));
+
+                if (rawData.Errors.Count > 0)
+                {
+                    _dialogService.ShowError($"读取失败:\n{string.Join("\n", rawData.Errors)}", "导入失败");
+                    OlsStatusText = "导入失败";
+                    return;
+                }
+
+                if (rawData.DataRowCount < 3)
+                {
+                    _dialogService.ShowError($"有效数据不足 3 行（当前 {rawData.DataRowCount} 行）", "数据不足");
+                    OlsStatusText = "数据不足";
+                    return;
+                }
+
+                IsLoading = false;
+
+                // Step 2: 构建预填配置，弹窗让用户确认
+                var columnConfigs = BuildColumnConfigs(rawData);
+
+                bool confirmed = false;
+                System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                {
+                    var dialog = new Views.OlsImportConfirmDialog(columnConfigs, path, rawData.DataRowCount);
+                    dialog.Owner = System.Windows.Application.Current.MainWindow;
+                    dialog.ShowDialog();
+                    confirmed = dialog.Confirmed;
+                });
+
+                if (!confirmed)
+                {
+                    OlsStatusText = "已取消导入";
+                    return;
+                }
+
+                // Step 3: 根据确认的配置构建分析数据
+                IsLoading = true;
+                OlsStatusText = "正在构建分析数据...";
+
+                var importResult = ApplyConfirmedConfig(rawData, columnConfigs);
+
+                if (importResult.DataCount < 3)
+                {
+                    _dialogService.ShowError("排除空值后有效数据不足 3 行。", "数据不足");
+                    OlsStatusText = "数据不足";
+                    return;
+                }
+
+                // Step 4: 保存并执行分析
+                DirectImportFilePath = path;
+                _directImportFactorNames = importResult.FactorNames;
+                _directImportResponseNames = importResult.ResponseNames;
+                _directImportFactorTypes = importResult.FactorTypes;
+                _directImportFactorsData = importResult.FactorsData;
+                _directImportResponsesData = importResult.ResponsesData;
+
+                IsDirectImportMode = true;
+                SelectedOlsBatch = null;
+
+                ResponseNames = importResult.ResponseNames;
+                _selectedResponseName = ResponseNames.FirstOrDefault() ?? "";
+                RaisePropertyChanged(nameof(SelectedResponseName));
+
+                OlsStatusText = $"已导入 {importResult.DataCount} 行，{importResult.FactorNames.Count} 个因子，{importResult.ResponseNames.Count} 个响应";
+
+                await RunDirectOlsAnalysisAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "OLS 直接导入失败");
+                _dialogService.ShowError($"导入失败: {ex.Message}", "错误");
+                OlsStatusText = $"导入失败: {ex.Message}";
+            }
+            finally
+            {
+                IsLoading = false;
+            }
+        }
+        /// <summary>
+        /// 根据原始数据自动预填列配置
+        /// 规则: 含文字列→类别因子, 全数值列→连续因子, 最后一个全数值列→响应
+        /// </summary>
+        private static ObservableCollection<ColumnConfigItem> BuildColumnConfigs(DirectImportRawData rawData)
+        {
+            var configs = new ObservableCollection<ColumnConfigItem>();
+
+            // 找最后一个全数值列作为默认响应
+            int lastNumericCol = -1;
+            for (int c = rawData.Headers.Count - 1; c >= 0; c--)
+            {
+                if (rawData.IsNumericColumn[c]) { lastNumericCol = c; break; }
+            }
+
+            for (int c = 0; c < rawData.Headers.Count; c++)
+            {
+                var data = rawData.ColumnData[c];
+                var nonNullValues = data.Where(v => v != null).ToList();
+                var uniqueCount = nonNullValues.Select(v => v!.ToString()).Distinct().Count();
+                var preview = nonNullValues.Take(5).Select(v => v!.ToString() ?? "").ToList();
+
+                var item = new ColumnConfigItem
+                {
+                    ColumnName = rawData.Headers[c],
+                    IsAllNumeric = rawData.IsNumericColumn[c],
+                    UniqueCount = uniqueCount,
+                    PreviewValues = preview!
+                };
+
+                // 自动预填角色和类型
+                if (c == lastNumericCol)
+                {
+                    item.Role = "Response";
+                    item.FactorType = "";
+                }
+                else if (!rawData.IsNumericColumn[c])
+                {
+                    item.Role = "Factor";
+                    item.FactorType = "Categorical";
+                }
+                else if (rawData.IsNumericColumn[c] && uniqueCount <= 5 && nonNullValues.Count > 10)
+                {
+                    // 数值列但唯一值很少 → 可能是类别，但默认连续让用户决定
+                    item.Role = "Factor";
+                    item.FactorType = "Continuous";
+                }
+                else
+                {
+                    item.Role = "Factor";
+                    item.FactorType = "Continuous";
+                }
+
+                configs.Add(item);
+            }
+
+            return configs;
+        }
+        /// <summary>
+        /// 根据用户确认的列配置，从原始数据构建 OLS 分析所需的结构化数据
+        /// </summary>
+        private static DirectImportResult ApplyConfirmedConfig(
+            DirectImportRawData rawData,
+            ObservableCollection<ColumnConfigItem> configs)
+        {
+            var result = new DirectImportResult();
+
+            var factorConfigs = configs.Where(c => c.Role == "Factor").ToList();
+            var responseConfigs = configs.Where(c => c.Role == "Response").ToList();
+
+            result.FactorNames = factorConfigs.Select(c => c.ColumnName).ToList();
+            result.ResponseNames = responseConfigs.Select(c => c.ColumnName).ToList();
+
+            // 因子类型
+            foreach (var fc in factorConfigs)
+                result.FactorTypes[fc.ColumnName] = fc.FactorType == "Categorical" ? "categorical" : "continuous";
+
+            // 列名→索引映射
+            var colIndexMap = new Dictionary<string, int>();
+            for (int i = 0; i < rawData.Headers.Count; i++)
+                colIndexMap[rawData.Headers[i]] = i;
+
+            // 构建数据行
+            for (int row = 0; row < rawData.DataRowCount; row++)
+            {
+                // 检查所有必需列是否有值
+                bool hasNull = false;
+                foreach (var fc in factorConfigs)
+                {
+                    if (rawData.ColumnData[colIndexMap[fc.ColumnName]][row] == null) { hasNull = true; break; }
+                }
+                if (hasNull) continue;
+                foreach (var rc in responseConfigs)
+                {
+                    if (rawData.ColumnData[colIndexMap[rc.ColumnName]][row] == null) { hasNull = true; break; }
+                }
+                if (hasNull) continue;
+
+                // 因子行
+                var factorRow = new Dictionary<string, object>();
+                foreach (var fc in factorConfigs)
+                {
+                    factorRow[fc.ColumnName] = rawData.ColumnData[colIndexMap[fc.ColumnName]][row]!;
+                }
+                result.FactorsData.Add(factorRow);
+
+                // 响应值
+                foreach (var rc in responseConfigs)
+                {
+                    var respName = rc.ColumnName;
+                    if (!result.ResponsesData.ContainsKey(respName))
+                        result.ResponsesData[respName] = new List<double>();
+                    result.ResponsesData[respName].Add((double)rawData.ColumnData[colIndexMap[respName]][row]!);
+                }
+            }
+
+            result.DataCount = result.FactorsData.Count;
+            return result;
+        }
+        /// <summary>
+        /// 执行直接导入数据的 OLS 分析
+        /// </summary>
+        private async Task RunDirectOlsAnalysisAsync()
+        {
+            if (!IsDirectImportMode || _directImportFactorsData.Count == 0) return;
+            if (string.IsNullOrEmpty(_selectedResponseName)) return;
+
+            if (!_directImportResponsesData.TryGetValue(_selectedResponseName, out var responsesData))
+            {
+                OlsStatusText = $"未找到响应变量: {_selectedResponseName}";
+                return;
+            }
+
+            try
+            {
+                IsLoading = true;
+                OlsStatusText = "正在进行 OLS 回归分析...";
+
+                // ═══ Step 1: FitOLS ═══
+                OlsResult = await _analysisService.FitOlsDirectAsync(
+                    _directImportFactorsData,
+                    responsesData,
+                    _selectedResponseName,
+                    _directImportFactorTypes,
+                    "quadratic");
+
+                if (OlsResult?.ModelSummary == null)
+                {
+                    OlsStatusText = "OLS 分析返回空结果";
+                    return;
+                }
+
+                OlsStatusText = $"OLS 分析完成: R²={OlsResult.ModelSummary.RSquared:F4}, " +
+                                 $"R²adj={OlsResult.ModelSummary.RSquaredAdj:F4}";
+
+                // 不可估计项警告
+                InestimableWarning = OlsResult.InestimableWarning ?? "";
+                HasInestimableWarning = !string.IsNullOrEmpty(InestimableWarning);
+
+                // 连续因子列表（曲面图用）
+                OlsContinuousFactors = _directImportFactorNames
+                    .Where(f => _directImportFactorTypes.GetValueOrDefault(f, "continuous") == "continuous")
+                    .ToList();
+                if (OlsContinuousFactors.Count >= 2)
+                {
+                    OlsSurfaceFactor1 = OlsContinuousFactors[0];
+                    OlsSurfaceFactor2 = OlsContinuousFactors[1];
+                }
+
+                // ═══ Step 2: 方程展示 ═══
+                UpdateEquationsDisplay(OlsResult);
+
+                // ═══ Step 3: Pareto 图 ═══
+                await LoadDirectOlsParetoAsync();
+
+                // ═══ Step 4: 残差四合一 ═══
+                await LoadDirectResidualDiagnosticsAsync();
+
+                // ═══ Step 5: 响应曲面 + 等高线 ═══
+                await LoadDirectOlsSurfaceAsync();
+
+                // ═══ Step 6: 主效应图 ═══
+                await LoadDirectMainEffectsAsync();
+
+                // ═══ Step 7: 交互效应图 ═══
+                await LoadDirectInteractionEffectsAsync();
+
+                // ═══ Step 8: 异常点分析 ═══
+                await LoadDirectOutlierAnalysisAsync();
+
+                // ═══ Step 9: Box-Cox 分析 ═══
+                await LoadDirectBoxCoxAnalysisAsync();
+
+                // ═══ Step 10: Tukey HSD（仅在有类别因子时） ═══
+                if (_directImportFactorTypes.Values.Any(v => v == "categorical"))
+                {
+                    await LoadDirectTukeyHSDAsync();
+                }
+                else
+                {
+                    HasTukeyResult = false;
+                }
+
+                OlsStatusText = $"OLS 分析完成: R²={OlsResult.ModelSummary.RSquared:F4}, " +
+                                 $"R²adj={OlsResult.ModelSummary.RSquaredAdj:F4}, " +
+                                 $"来源=直接导入";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "直接导入 OLS 分析失败");
+                OlsStatusText = $"分析失败: {ex.Message}";
+            }
+            finally
+            {
+                IsLoading = false;
+            }
+        }
+
+        /// <summary>
+        /// 直接导入模式下的 Pareto 图
+        /// </summary>
+        private async Task LoadDirectOlsParetoAsync()
+        {
+            if (!IsDirectImportMode || string.IsNullOrEmpty(_selectedResponseName)) return;
+            try
+            {
+                var json = await Task.Run(() =>
+                    _analysisService.GetEffectsParetoDirectAsync(_selectedResponseName));
+
+                var wrapper = JsonConvert.DeserializeObject<ParetoResult>(json);
+                var data = wrapper?.Effects;
+                _paretoLogWorthCrit = wrapper?.LogWorthCrit ?? 1.301;
+                _paretoAlpha = wrapper?.Alpha ?? 0.05;
+                if (data == null || data.Count == 0) return;
+
+                _paretoTerms = data.Select(d => new ParetoTermItem
+                {
+                    TermName = d.Term,
+                    AbsT = d.AbsT,
+                    PValue = d.PValue,
+                    IsSignificant = d.Significant,
+                    IsIncluded = true
+                }).ToList();
+
+                RebuildParetoPlot();
+                UpdateTermsText();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "直接导入 Pareto 图加载失败");
+            }
+        }
+
+        /// <summary>
+        /// 直接导入模式下的残差诊断
+        /// </summary>
+        private async Task LoadDirectResidualDiagnosticsAsync()
+        {
+            if (!IsDirectImportMode || string.IsNullOrEmpty(_selectedResponseName)) return;
+            try
+            {
+                var json = await Task.Run(() =>
+                    _analysisService.GetResidualDiagnosticsDirectAsync(_selectedResponseName));
+
+                var diag = JsonConvert.DeserializeObject<ResidualDiagnostics>(json);
+                if (diag == null) return;
+
+                // (1) 正态概率图
+                var npModel = new PlotModel { Title = "正态概率图", TitleFontSize = 11, PlotMargins = new OxyThickness(50, 25, 15, 35) };
+                npModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "理论分位数", FontSize = 10 });
+                npModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "标准化残差", FontSize = 10 });
+                var npScatter = new ScatterSeries { MarkerType = MarkerType.Circle, MarkerSize = 3.5, MarkerFill = OxyColors.SteelBlue };
+                for (int i = 0; i < diag.NormalProbability.TheoreticalQuantiles.Count; i++)
+                    npScatter.Points.Add(new ScatterPoint(diag.NormalProbability.TheoreticalQuantiles[i], diag.NormalProbability.OrderedResiduals[i]));
+                npModel.Series.Add(npScatter);
+                if (diag.NormalProbability.TheoreticalQuantiles.Count > 0)
+                {
+                    double min = diag.NormalProbability.TheoreticalQuantiles.Min();
+                    double max = diag.NormalProbability.TheoreticalQuantiles.Max();
+                    var refLine = new LineSeries { Color = OxyColors.Red, LineStyle = LineStyle.Dash, StrokeThickness = 1 };
+                    refLine.Points.Add(new DataPoint(min, min));
+                    refLine.Points.Add(new DataPoint(max, max));
+                    npModel.Series.Add(refLine);
+                }
+                NormalProbPlot = npModel;
+
+                // (2) 残差 vs 拟合值
+                var rvfModel = new PlotModel { Title = "残差 vs 拟合值", TitleFontSize = 11, PlotMargins = new OxyThickness(50, 25, 15, 35) };
+                rvfModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "拟合值", FontSize = 10 });
+                rvfModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "标准化残差", FontSize = 10 });
+                var rvfScatter = new ScatterSeries { MarkerType = MarkerType.Circle, MarkerSize = 3.5, MarkerFill = OxyColors.DarkOrange };
+                for (int i = 0; i < diag.ResidualsVsFitted.Fitted.Count; i++)
+                    rvfScatter.Points.Add(new ScatterPoint(diag.ResidualsVsFitted.Fitted[i], diag.ResidualsVsFitted.Residuals[i]));
+                rvfModel.Series.Add(rvfScatter);
+                if (diag.ResidualsVsFitted.Fitted.Count > 0)
+                {
+                    var zeroLine = new LineSeries { Color = OxyColors.Gray, LineStyle = LineStyle.Dash, StrokeThickness = 1 };
+                    zeroLine.Points.Add(new DataPoint(diag.ResidualsVsFitted.Fitted.Min(), 0));
+                    zeroLine.Points.Add(new DataPoint(diag.ResidualsVsFitted.Fitted.Max(), 0));
+                    rvfModel.Series.Add(zeroLine);
+                }
+                ResidVsFittedPlot = rvfModel;
+
+                // (3) 残差直方图
+                var histModel = new PlotModel { Title = "残差直方图", TitleFontSize = 11, PlotMargins = new OxyThickness(50, 25, 15, 35) };
+                histModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "标准化残差", FontSize = 10 });
+                histModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "频率", FontSize = 10, Minimum = 0 });
+                var histSeries = new RectangleBarSeries { StrokeThickness = 0.5, StrokeColor = OxyColors.Gray };
+                for (int i = 0; i < diag.ResidualsHistogram.Frequencies.Count; i++)
+                {
+                    double x0 = diag.ResidualsHistogram.BinEdges[i];
+                    double x1 = diag.ResidualsHistogram.BinEdges[i + 1];
+                    histSeries.Items.Add(new RectangleBarItem { X0 = x0, X1 = x1, Y0 = 0, Y1 = diag.ResidualsHistogram.Frequencies[i], Color = OxyColor.FromRgb(100, 149, 237) });
+                }
+                histModel.Series.Add(histSeries);
+                ResidHistogramPlot = histModel;
+
+                // (4) 残差 vs 观测顺序
+                var rvoModel = new PlotModel { Title = "残差 vs 观测顺序", TitleFontSize = 11, PlotMargins = new OxyThickness(50, 25, 15, 35) };
+                rvoModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "观测顺序", FontSize = 10 });
+                rvoModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "标准化残差", FontSize = 10 });
+                var rvoLine = new LineSeries { Color = OxyColors.SteelBlue, MarkerType = MarkerType.Circle, MarkerSize = 3, MarkerFill = OxyColors.SteelBlue };
+                for (int i = 0; i < diag.ResidualsVsOrder.Order.Count; i++)
+                    rvoLine.Points.Add(new DataPoint(diag.ResidualsVsOrder.Order[i], diag.ResidualsVsOrder.Residuals[i]));
+                rvoModel.Series.Add(rvoLine);
+                if (diag.ResidualsVsOrder.Order.Count > 0)
+                {
+                    var zeroLine = new LineSeries { Color = OxyColors.Gray, LineStyle = LineStyle.Dash, StrokeThickness = 1 };
+                    zeroLine.Points.Add(new DataPoint(1, 0));
+                    zeroLine.Points.Add(new DataPoint(diag.ResidualsVsOrder.Order.Max(), 0));
+                    rvoModel.Series.Add(zeroLine);
+                }
+                ResidVsOrderPlot = rvoModel;
+            }
+            catch (Exception ex) { _logger.LogError(ex, "直接导入残差诊断图加载失败"); }
+        }
+        // ═══ 直接导入模式: 响应曲面 ═══
+        private async Task LoadDirectOlsSurfaceAsync()
+        {
+            if (!IsDirectImportMode || string.IsNullOrEmpty(_selectedResponseName)) return;
+            if (string.IsNullOrEmpty(OlsSurfaceFactor1) || string.IsNullOrEmpty(OlsSurfaceFactor2)
+                || OlsSurfaceFactor1 == OlsSurfaceFactor2) return;
+
+            try
+            {
+                // 构建 bounds JSON
+                var boundsDict = new Dictionary<string, object>();
+                foreach (var factorRow in _directImportFactorsData)
+                {
+                    foreach (var kv in factorRow)
+                    {
+                        if (!boundsDict.ContainsKey(kv.Key))
+                        {
+                            if (_directImportFactorTypes.GetValueOrDefault(kv.Key, "continuous") == "categorical")
+                            {
+                                boundsDict[kv.Key] = _directImportFactorsData
+                                    .Select(r => r[kv.Key]?.ToString() ?? "").Distinct().OrderBy(v => v).ToList();
+                            }
+                            else
+                            {
+                                var vals = _directImportFactorsData.Select(r => Convert.ToDouble(r[kv.Key])).ToList();
+                                boundsDict[kv.Key] = new[] { vals.Min(), vals.Max() };
+                            }
+                        }
+                    }
+                }
+                var boundsJson = JsonConvert.SerializeObject(boundsDict);
+
+                // 3D 曲面图
+                var imageBytes = await Task.Run(() =>
+                    _analysisService.GetOlsSurfaceImageDirectAsync(OlsSurfaceFactor1, OlsSurfaceFactor2, boundsJson));
+
+                if (imageBytes.Length > 0)
+                {
+                    var bmp = new BitmapImage();
+                    using (var ms = new MemoryStream(imageBytes))
+                    {
+                        bmp.BeginInit(); bmp.CacheOption = BitmapCacheOption.OnLoad;
+                        bmp.StreamSource = ms; bmp.EndInit(); bmp.Freeze();
+                    }
+                    System.Windows.Application.Current.Dispatcher.Invoke(() => { OlsSurfaceImage = bmp; });
+                }
+                else { OlsSurfaceImage = null; }
+
+                // 等高线
+                var contourJson = await Task.Run(() =>
+                    _analysisService.GetOlsContourDataDirectAsync(OlsSurfaceFactor1, OlsSurfaceFactor2, boundsJson));
+                var contourData = JsonConvert.DeserializeObject<SurfaceData>(contourJson);
+                if (contourData?.Z != null) BuildContourPlot(contourData);
+            }
+            catch (Exception ex) { _logger.LogError(ex, "直接导入 OLS 响应曲面加载失败"); }
+        }
+
+        // ═══ 直接导入模式: 主效应图 ═══
+        private async Task LoadDirectMainEffectsAsync()
+        {
+            if (!IsDirectImportMode || string.IsNullOrEmpty(_selectedResponseName)) return;
+            try
+            {
+                var json = await Task.Run(() =>
+                    _analysisService.GetMainEffectsDirectAsync(_selectedResponseName));
+                var data = JsonConvert.DeserializeObject<Dictionary<string, List<MainEffectPoint>>>(json);
+                if (data == null || data.Count == 0) return;
+
+                var model = new PlotModel
+                {
+                    Title = "主效应图",
+                    TitleFontSize = 12,
+                    PlotMargins = new OxyThickness(50, 25, 15, 35)
+                };
+                model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = _selectedResponseName, FontSize = 10 });
+                model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "因子水平", FontSize = 10 });
+
+                var colors = new[] { OxyColors.Blue, OxyColors.Red, OxyColors.Green, OxyColors.Orange,
+                             OxyColors.Purple, OxyColors.Brown, OxyColors.DarkCyan };
+                int ci = 0;
+                double globalMean = data.Values.SelectMany(pts => pts).Average(p => p.Mean);
+                double xMin = double.MaxValue, xMax = double.MinValue;
+
+                foreach (var kv in data)
+                {
+                    var series = new LineSeries
+                    {
+                        Title = kv.Key,
+                        Color = colors[ci % colors.Length],
+                        MarkerType = MarkerType.Circle,
+                        MarkerSize = 5,
+                        StrokeThickness = 2
+                    };
+                    for (int i = 0; i < kv.Value.Count; i++)
+                    {
+                        var pt = kv.Value[i];
+                        double xVal = pt.Level is double d ? d
+                            : double.TryParse(pt.Level?.ToString(), out var parsed) ? parsed : i;
+                        series.Points.Add(new DataPoint(xVal, pt.Mean));
+                        xMin = Math.Min(xMin, xVal); xMax = Math.Max(xMax, xVal);
+                    }
+                    model.Series.Add(series); ci++;
+                }
+
+                if (xMin < xMax)
+                {
+                    var meanLine = new LineSeries { Color = OxyColors.Gray, LineStyle = LineStyle.Dash, StrokeThickness = 1 };
+                    meanLine.Points.Add(new DataPoint(xMin, globalMean));
+                    meanLine.Points.Add(new DataPoint(xMax, globalMean));
+                    model.Series.Add(meanLine);
+                }
+
+                model.Legends.Add(new Legend { LegendPosition = LegendPosition.RightTop, LegendFontSize = 10, IsLegendVisible = true });
+                OlsMainEffectsPlot = model;
+            }
+            catch (Exception ex) { _logger.LogError(ex, "直接导入主效应图加载失败"); }
+        }
+
+        // ═══ 直接导入模式: 交互效应图 ═══
+        private async Task LoadDirectInteractionEffectsAsync()
+        {
+            if (!IsDirectImportMode || string.IsNullOrEmpty(_selectedResponseName)) return;
+            try
+            {
+                var json = await Task.Run(() =>
+                    _analysisService.GetInteractionEffectsDirectAsync(_selectedResponseName));
+                var data = JsonConvert.DeserializeObject<List<InteractionEffectData>>(json);
+                if (data == null || data.Count == 0) return;
+
+                var first = data[0];
+                var model = new PlotModel
+                {
+                    Title = $"交互效应: {first.Factor1} × {first.Factor2}",
+                    TitleFontSize = 12,
+                    PlotMargins = new OxyThickness(50, 25, 15, 35)
+                };
+                model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = _selectedResponseName, FontSize = 10 });
+                model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = first.Factor1, FontSize = 10 });
+
+                var grouped = first.Data.GroupBy(d => d.F2?.ToString() ?? "").ToList();
+                var colors = new[] { OxyColors.Blue, OxyColors.Red, OxyColors.Green, OxyColors.Orange };
+                int ci = 0;
+
+                foreach (var group in grouped)
+                {
+                    var series = new LineSeries
+                    {
+                        Title = $"{first.Factor2}={group.Key}",
+                        Color = colors[ci % colors.Length],
+                        MarkerType = MarkerType.Circle,
+                        MarkerSize = 4,
+                        StrokeThickness = 2
+                    };
+                    foreach (var pt in group.OrderBy(p => p.F1 is double d ? d : double.TryParse(p.F1?.ToString(), out var parsed) ? parsed : 0.0))
+                    {
+                        double xVal = pt.F1 is double d ? d : double.TryParse(pt.F1?.ToString(), out var parsed) ? parsed : 0;
+                        series.Points.Add(new DataPoint(xVal, pt.Mean));
+                    }
+                    model.Series.Add(series); ci++;
+                }
+
+                model.Legends.Add(new Legend { LegendPosition = LegendPosition.RightTop, LegendFontSize = 10, IsLegendVisible = true });
+                OlsInteractionPlot = model;
+            }
+            catch (Exception ex) { _logger.LogError(ex, "直接导入交互效应图加载失败"); }
+        }
+
+        // ═══ 直接导入模式: 异常点分析 ═══
+        private async Task LoadDirectOutlierAnalysisAsync()
+        {
+            if (!IsDirectImportMode || string.IsNullOrEmpty(_selectedResponseName)) return;
+            try
+            {
+                var json = await Task.Run(() =>
+                    _analysisService.GetOutlierAnalysisDirectAsync(_selectedResponseName));
+                var data = JsonConvert.DeserializeObject<OutlierAnalysisResult>(json);
+                if (data == null) return;
+
+                OutlierItems = data.Outliers.Select(o => new OutlierItem
+                {
+                    Index = o.Index,
+                    Actual = o.Actual,
+                    Predicted = o.Predicted,
+                    Residual = o.Residual,
+                    StdResidual = o.StdResidual,
+                    CooksD = o.CooksD,
+                    Leverage = o.Leverage,
+                    Reasons = string.Join("; ", o.Reasons),
+                    IsExcluded = false
+                }).ToList();
+
+                HasOutliers = data.OutlierCount > 0;
+                OutlierSummaryText = data.OutlierCount > 0
+                    ? $"检测到 {data.OutlierCount} 个异常点（共 {data.TotalObservations} 个观测）"
+                    : $"未检测到异常点（共 {data.TotalObservations} 个观测）";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "直接导入异常点分析失败");
+                HasOutliers = false;
+            }
+        }
+
+        // ═══ 直接导入模式: Box-Cox ═══
+        private async Task LoadDirectBoxCoxAnalysisAsync()
+        {
+            if (!IsDirectImportMode || string.IsNullOrEmpty(_selectedResponseName)) return;
+            try
+            {
+                var json = await Task.Run(() =>
+                    _analysisService.GetBoxCoxAnalysisDirectAsync(_selectedResponseName));
+                var data = JsonConvert.DeserializeObject<BoxCoxResult>(json);
+                if (data == null || data.Error != null)
+                {
+                    HasBoxCoxResult = false;
+                    BoxCoxRecommendation = data?.Error ?? "";
+                    return;
+                }
+
+                BoxCoxLambda = data.RoundedLambda;
+                BoxCoxTransformName = data.TransformName;
+                BoxCoxOrigR2 = data.OriginalRSquared;
+                BoxCoxTransR2 = data.TransformedRSquared;
+                BoxCoxRecommend = data.RecommendTransform;
+                BoxCoxRecommendation = data.Recommendation;
+                HasBoxCoxResult = true;
+
+                if (data.LambdaProfile?.Lambdas != null)
+                {
+                    var model = new PlotModel
+                    {
+                        Title = "Box-Cox λ 优化曲线",
+                        TitleFontSize = 11,
+                        PlotMargins = new OxyThickness(50, 25, 15, 35)
+                    };
+                    model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "λ", FontSize = 10 });
+                    model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Log-Likelihood", FontSize = 10 });
+
+                    var line = new LineSeries { Color = OxyColors.SteelBlue, StrokeThickness = 2 };
+                    for (int i = 0; i < data.LambdaProfile.Lambdas.Count; i++)
+                    {
+                        if (data.LambdaProfile.LogLikelihoods[i].HasValue)
+                            line.Points.Add(new DataPoint(data.LambdaProfile.Lambdas[i], data.LambdaProfile.LogLikelihoods[i]!.Value));
+                    }
+                    model.Series.Add(line);
+
+                    model.Annotations.Add(new LineAnnotation
+                    {
+                        Type = LineAnnotationType.Vertical,
+                        X = data.OptimalLambda,
+                        Color = OxyColors.Red,
+                        LineStyle = LineStyle.Dash,
+                        StrokeThickness = 1.5,
+                        Text = $"λ={data.OptimalLambda:F2}",
+                        TextColor = OxyColors.Red,
+                        FontSize = 10
+                    });
+
+                    if (data.LambdaCI != null && data.LambdaCI.Count == 2)
+                    {
+                        model.Annotations.Add(new LineAnnotation { Type = LineAnnotationType.Vertical, X = data.LambdaCI[0], Color = OxyColor.FromArgb(100, 0, 100, 255), LineStyle = LineStyle.Dot, StrokeThickness = 1 });
+                        model.Annotations.Add(new LineAnnotation { Type = LineAnnotationType.Vertical, X = data.LambdaCI[1], Color = OxyColor.FromArgb(100, 0, 100, 255), LineStyle = LineStyle.Dot, StrokeThickness = 1 });
+                    }
+
+                    BoxCoxProfilePlot = model;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "直接导入 Box-Cox 分析失败");
+                HasBoxCoxResult = false;
+            }
+        }
+
+        // ═══ 直接导入模式: Tukey HSD ═══
+        private async Task LoadDirectTukeyHSDAsync()
+        {
+            if (!IsDirectImportMode || string.IsNullOrEmpty(_selectedResponseName)) return;
+            var catFactor = _directImportFactorTypes.FirstOrDefault(kv => kv.Value == "categorical").Key;
+            if (string.IsNullOrEmpty(catFactor)) { HasTukeyResult = false; return; }
+
+            try
+            {
+                var json = await Task.Run(() =>
+                    _analysisService.GetTukeyHSDDirectAsync(_selectedResponseName, catFactor));
+
+                var data = JsonConvert.DeserializeObject<TukeyHSDResult>(json);
+                if (data == null || data.Error != null) { HasTukeyResult = false; return; }
+
+                TukeyFactorName = data.FactorName;
+                TukeyComparisons = data.Comparisons.Select(c => new TukeyComparisonItem
+                {
+                    Group1 = c.Group1,
+                    Group2 = c.Group2,
+                    MeanDiff = c.MeanDiff,
+                    PValue = c.PValue,
+                    CILower = c.CILower,
+                    CIUpper = c.CIUpper,
+                    Significant = c.Significant
+                }).ToList();
+                _tukeyGroupMeans = data.GroupMeans;
+                HasTukeyResult = true;
+            }
+            catch (Exception ex) { _logger.LogError(ex, "直接导入 Tukey HSD 失败"); HasTukeyResult = false; }
+        }
+        /// <summary>
+        /// 读取 Excel 文件用于直接 OLS 分析
+        /// 自动识别: 尝试将每列转为数值，全部可转 → 连续因子/响应；否则 → 类别因子
+        /// 规则: 最后 N 列全为数值 → 作为响应变量，其余为因子
+        /// 但如果 Excel 只有 2 列数值，则最后一列为响应
+        /// </summary>
+        /// <summary>
+        /// 读取 Excel 文件的原始列数据（不做角色判断，由弹窗确认）
+        /// </summary>
+        private static DirectImportRawData ReadExcelRawData(string path)
+        {
+            var result = new DirectImportRawData();
+            try
+            {
+                using var package = new ExcelPackage(new FileInfo(path));
+                var ws = package.Workbook.Worksheets.FirstOrDefault();
+                if (ws == null || ws.Dimension == null)
+                {
+                    result.Errors.Add("Excel 文件为空或没有工作表");
+                    return result;
+                }
+
+                int totalCols = ws.Dimension.End.Column;
+                int totalRows = ws.Dimension.End.Row;
+
+                if (totalRows < 2)
+                {
+                    result.Errors.Add("至少需要 1 行列头 + 1 行数据");
+                    return result;
+                }
+
+                // 读取列头
+                for (int col = 1; col <= totalCols; col++)
+                {
+                    var header = ws.Cells[1, col].Text?.Trim();
+                    if (string.IsNullOrEmpty(header)) header = $"Col{col}";
+                    result.Headers.Add(header);
+                    result.ColumnData.Add(new List<object?>());
+                    result.IsNumericColumn.Add(true);
+                }
+
+                // 读取数据
+                for (int row = 2; row <= totalRows; row++)
+                {
+                    bool allEmpty = true;
+                    for (int c = 0; c < totalCols; c++)
+                    {
+                        var cellText = ws.Cells[row, c + 1].Text?.Trim() ?? "";
+                        if (!string.IsNullOrEmpty(cellText)) allEmpty = false;
+
+                        if (double.TryParse(cellText, out var numVal))
+                        {
+                            result.ColumnData[c].Add(numVal);
+                        }
+                        else if (string.IsNullOrEmpty(cellText))
+                        {
+                            result.ColumnData[c].Add(null);
+                        }
+                        else
+                        {
+                            result.ColumnData[c].Add(cellText);
+                            result.IsNumericColumn[c] = false;
+                        }
+                    }
+                    if (allEmpty) break;
+                }
+
+                result.DataRowCount = result.ColumnData[0].Count;
+            }
+            catch (Exception ex)
+            {
+                result.Errors.Add($"读取 Excel 失败: {ex.Message}");
+            }
+            return result;
+        }
+
+        private class DirectImportRawData
+        {
+            public List<string> Headers { get; set; } = new();
+            public List<List<object?>> ColumnData { get; set; } = new();
+            public List<bool> IsNumericColumn { get; set; } = new();
+            public int DataRowCount { get; set; }
+            public List<string> Errors { get; set; } = new();
+        }
+
+        // ── 直接导入结果数据类 ──
+        private class DirectImportResult
+        {
+            public List<string> FactorNames { get; set; } = new();
+            public List<string> ResponseNames { get; set; } = new();
+            public Dictionary<string, string> FactorTypes { get; set; } = new();
+            public List<Dictionary<string, object>> FactorsData { get; set; } = new();
+            public Dictionary<string, List<double>> ResponsesData { get; set; } = new();
+            public int DataCount { get; set; }
+            public List<string> Errors { get; set; } = new();
         }
         private class EvolutionPoint { [JsonProperty("data_count")] public int DataCount { get; set; } [JsonProperty("r_squared")] public double RSquared { get; set; } }
         private class TrainingDataRecord { [JsonProperty("factors")] public Dictionary<string, double>? Factors { get; set; } [JsonProperty("response")] public double Response { get; set; } [JsonProperty("source")] public string? Source { get; set; } [JsonProperty("batch_name")] public string? BatchName { get; set; } [JsonProperty("timestamp")] public string? Timestamp { get; set; } }

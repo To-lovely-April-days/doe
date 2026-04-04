@@ -629,7 +629,164 @@ namespace MaxChemical.Modules.DOE.Services
                 }
             }
         }
+        /// <summary>
+        /// ★ 新增: 直接数据导入 OLS 分析（不通过批次）
+        /// 数据由调用方从 Excel 读取后传入，绕过 LoadBatchDataAsync
+        /// </summary>
+        public Task<OLSAnalysisResult> FitOlsDirectAsync(
+            List<Dictionary<string, object>> factorsData,
+            List<double> responsesData,
+            string responseName,
+            Dictionary<string, string>? factorTypes = null,
+            string modelType = "quadratic")
+        {
+            EnsureReady();
 
+            var factorsJson = JsonConvert.SerializeObject(factorsData);
+            var responsesJson = JsonConvert.SerializeObject(responsesData);
+            var factorTypesJson = factorTypes != null
+                ? JsonConvert.SerializeObject(factorTypes)
+                : "{}";
+
+            _logger.LogInformation("FitOLS Direct: response={Response}, rows={Count}, model={Model}",
+                responseName, factorsData.Count, modelType);
+
+            using (Py.GIL())
+            {
+                // 直接加载数据（不走批次）
+                _analyzer!.load_data(factorsJson, responsesJson, responseName, factorTypesJson);
+
+                string resultJson = _analyzer!.fit_ols(modelType).ToString();
+                var pyResult = JsonConvert.DeserializeObject<PythonOLSResult>(resultJson);
+
+                if (pyResult == null || pyResult.Error != null)
+                {
+                    _logger.LogError("FitOLS Direct 失败: {Error}", pyResult?.Error ?? "未知错误");
+                    return Task.FromResult(new OLSAnalysisResult
+                    {
+                        DroppedTerms = pyResult?.DroppedTerms ?? new(),
+                        InestimableWarning = pyResult?.InestimableWarning ?? ""
+                    });
+                }
+
+                var result = ParseOLSResult(pyResult, modelType);
+                _logger.LogInformation("FitOLS Direct 完成: R²={R2}, 系数数={Count}",
+                    result.ModelSummary?.RSquared, result.Coefficients?.Count);
+
+                // 清除批次缓存标记，防止后续方法误用
+                _loadedBatchId = "";
+                _loadedResponseName = responseName;
+
+                return Task.FromResult(result);
+            }
+        }
+        // ═══════════════════════════════════════════════════════
+        // ★ 新增: Direct 模式方法（analyzer 已有数据和模型）
+        // ═══════════════════════════════════════════════════════
+
+        public string GetEffectsParetoDirectAsync(string responseName, double alpha = 0.05)
+        {
+            EnsureReady();
+            using (Py.GIL()) { return _analyzer!.effects_pareto(alpha).ToString(); }
+        }
+
+        public string GetResidualDiagnosticsDirectAsync(string responseName)
+        {
+            EnsureReady();
+            using (Py.GIL()) { return _analyzer!.residual_diagnostics().ToString(); }
+        }
+
+        public string GetMainEffectsDirectAsync(string responseName)
+        {
+            EnsureReady();
+            using (Py.GIL()) { return _analyzer!.main_effects().ToString(); }
+        }
+
+        public string GetInteractionEffectsDirectAsync(string responseName)
+        {
+            EnsureReady();
+            using (Py.GIL()) { return _analyzer!.interaction_effects().ToString(); }
+        }
+
+        public string GetOutlierAnalysisDirectAsync(string responseName)
+        {
+            EnsureReady();
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols("quadratic");
+                return _analyzer!.outlier_analysis().ToString();
+            }
+        }
+
+        public string GetBoxCoxAnalysisDirectAsync(string responseName)
+        {
+            EnsureReady();
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols("quadratic");
+                return _analyzer!.box_cox_analysis().ToString();
+            }
+        }
+
+        public string GetOlsSurfaceDataDirectAsync(string factor1, string factor2, string boundsJson, int gridSize = 30)
+        {
+            EnsureReady();
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols("quadratic");
+                return _analyzer!.response_surface_data_ols(factor1, factor2, gridSize, boundsJson).ToString();
+            }
+        }
+
+        public byte[] GetOlsSurfaceImageDirectAsync(string factor1, string factor2, string boundsJson)
+        {
+            EnsureReady();
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols("quadratic");
+                string base64 = _analyzer!.response_surface_image_ols(factor1, factor2, 50, 800, 600, boundsJson).ToString();
+                return string.IsNullOrEmpty(base64) ? Array.Empty<byte>() : Convert.FromBase64String(base64);
+            }
+        }
+
+        public string GetOlsContourDataDirectAsync(string factor1, string factor2, string boundsJson, int gridSize = 30)
+        {
+            EnsureReady();
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols("quadratic");
+                return _analyzer!.contour_data_ols(factor1, factor2, gridSize, boundsJson).ToString();
+            }
+        }
+
+        public string GetPredictionProfilerDirectAsync(string responseName, int gridSize = 50, string fixedValuesJson = "")
+        {
+            EnsureReady();
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols("quadratic");
+                return _analyzer!.prediction_profiler(gridSize, fixedValuesJson).ToString();
+            }
+        }
+
+        public string FindOptimalDirectAsync(string responseName, bool maximize = true)
+        {
+            EnsureReady();
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols("quadratic");
+                return _analyzer!.find_optimal(maximize).ToString();
+            }
+        }
+        public string GetTukeyHSDDirectAsync(string responseName, string categoricalFactorName)
+        {
+            EnsureReady();
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols("quadratic");
+                return _analyzer!.tukey_hsd(categoricalFactorName).ToString();
+            }
+        }
         // ═══════════════════════════════════════════════════════
         // Python 结果反序列化类
         // ═══════════════════════════════════════════════════════

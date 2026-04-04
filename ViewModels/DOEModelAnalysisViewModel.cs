@@ -337,7 +337,21 @@ namespace MaxChemical.Modules.DOE.ViewModels
         private double _boxCoxTransR2;
         private bool _boxCoxRecommend;
         private PlotModel? _boxCoxProfilePlot;
-
+        // ── ★ v13: 编码/未编码切换 ──
+        private bool _isCodedEquation = true;
+        public bool IsCodedEquation
+        {
+            get => _isCodedEquation;
+            set
+            {
+                if (SetProperty(ref _isCodedEquation, value) && OlsResult != null)
+                {
+                    UpdateEquationsDisplay(OlsResult);
+                    RaisePropertyChanged(nameof(EquationModeText));
+                }
+            }
+        }
+        public string EquationModeText => IsCodedEquation ? "编码单位" : "未编码单位";
         public string BoxCoxRecommendation { get => _boxCoxRecommendation; set => SetProperty(ref _boxCoxRecommendation, value); }
         public bool HasBoxCoxResult { get => _hasBoxCoxResult; set => SetProperty(ref _hasBoxCoxResult, value); }
         public double BoxCoxLambda { get => _boxCoxLambda; set => SetProperty(ref _boxCoxLambda, value); }
@@ -349,7 +363,10 @@ namespace MaxChemical.Modules.DOE.ViewModels
         public List<TukeyComparisonItem> TukeyComparisons { get => _tukeyComparisons; set => SetProperty(ref _tukeyComparisons, value); }
         public string TukeyFactorName { get => _tukeyFactorName; set => SetProperty(ref _tukeyFactorName, value); }
         public bool HasTukeyResult { get => _hasTukeyResult; set => SetProperty(ref _hasTukeyResult, value); }
-
+        private double _paretoLogWorthCrit = 1.301;
+        private double _paretoAlpha = 0.05;
+        private string _currentEquationText = "";
+        public string CurrentEquationText { get => _currentEquationText; set => SetProperty(ref _currentEquationText, value); }
         // ── Commands ──
         public DelegateCommand RefitReducedModelCommand { get; }
         public DelegateCommand RestoreFullModelCommand { get; }
@@ -362,6 +379,8 @@ namespace MaxChemical.Modules.DOE.ViewModels
         public DelegateCommand RestoreAllDataCommand { get; }
         public DelegateCommand ApplyBoxCoxCommand { get; }
         public DelegateCommand ExportReportCommand { get; }
+        // 声明:
+        public DelegateCommand ToggleEquationCodingCommand { get; }
         public DOEModelAnalysisViewModel(
             IGPRModelService gprService, IDOEAnalysisService analysisService,
             IDOERepository repository, IFlowParameterProvider paramProvider,
@@ -403,6 +422,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
             RestoreAllDataCommand = new DelegateCommand(async () => await RestoreAllDataAsync());
             ApplyBoxCoxCommand = new DelegateCommand(async () => await ApplyBoxCoxAsync());
             ExportReportCommand = new DelegateCommand(async () => await ExportOlsReportAsync());
+            ToggleEquationCodingCommand = new DelegateCommand(() => IsCodedEquation = !IsCodedEquation);
         }
 
         // ══════════════ Properties — GPR ══════════════
@@ -1128,7 +1148,16 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
         private void UpdateEquationsDisplay(OLSAnalysisResult result)
         {
-            var eqInfo = result.ModelSummary.Equations;
+            EquationsInfo? eqInfo;
+            if (IsCodedEquation)
+            {
+                eqInfo = result.ModelSummary?.Equations;
+            }
+            else
+            {
+                eqInfo = result.UncodedEquations;
+            }
+
             if (eqInfo != null && eqInfo.HasCategorical)
             {
                 HasCategoricalEquations = true;
@@ -1145,6 +1174,16 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 HasCategoricalEquations = false;
                 CategoryEquations = new();
             }
+
+            // ★ v13: 纯连续因子时也要切换方程文本
+            if (IsCodedEquation)
+            {
+                CurrentEquationText = result.ModelSummary?.Equation ?? "";
+            }
+            else
+            {
+                CurrentEquationText = result.UncodedEquation ?? result.ModelSummary?.Equation ?? "";
+            }
         }
         // ═══ Pareto 图构建（支持点击切换） ═══
 
@@ -1154,7 +1193,10 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 var json = await _analysisService.GetEffectsParetoAsync(
                     SelectedOlsBatch!.BatchId, _selectedResponseName);
-                var data = JsonConvert.DeserializeObject<List<ParetoEffectItem>>(json);
+                var wrapper = JsonConvert.DeserializeObject<ParetoResult>(json);
+                var data = wrapper?.Effects;
+                _paretoLogWorthCrit = wrapper?.LogWorthCrit ?? 1.301;
+                _paretoAlpha = wrapper?.Alpha ?? 0.05;
                 if (data == null || data.Count == 0) return;
 
                 // 保存项数据（用于点击交互）
@@ -1191,7 +1233,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
             var model = new PlotModel
             {
-                Title = "标准化效应 Pareto 图 (α = 0.05)",
+                Title = $"效应显著性 Pareto 图 (α = {_paretoAlpha})",
                 TitleFontSize = 12,
                 TitleFontWeight = OxyPlot.FontWeights.Bold,
                 Subtitle = "点击条形可切换保留/删除 — 蓝色=保留, 灰色=删除",
@@ -1214,27 +1256,14 @@ namespace MaxChemical.Modules.DOE.ViewModels
             for (int i = sorted.Count - 1; i >= 0; i--)
                 catAxis.Labels.Add(sorted[i].TermName);
 
-            double tCrit = 2.08;
-            if (OlsResult?.AnovaTable != null)
-            {
-                var residualRow = OlsResult.AnovaTable.FirstOrDefault(r => r.Source == "残差");
-                if (residualRow != null && residualRow.DF > 0)
-                {
-                    double df = residualRow.DF;
-                    double z = 1.959964;
-                    tCrit = z + (z * z * z + z) / (4 * df)
-                              + (5 * Math.Pow(z, 5) + 16 * z * z * z + 3 * z) / (96 * df * df);
-                    tCrit = Math.Round(tCrit, 2);
-                }
-            }
-
+            double tCrit = _paretoLogWorthCrit;
             double maxT = sorted.Count > 0 ? sorted[0].AbsT : 5;
             double xMax = Math.Max(maxT, tCrit) * 1.25;
 
             var valAxis = new LinearAxis
             {
                 Position = AxisPosition.Bottom,
-                Title = "标准化效应 |t|",
+                Title = "LogWorth = -log\u2081\u2080(P)",
                 TitleFontSize = 10,
                 Minimum = 0,
                 AbsoluteMinimum = 0,
@@ -1280,7 +1309,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 Color = OxyColor.FromArgb(200, 220, 50, 50),
                 LineStyle = LineStyle.Dash,
                 StrokeThickness = 1.8,
-                Text = $"  t = {tCrit:F2}",
+                Text = $"  {_paretoLogWorthCrit:F2}",
                 TextColor = OxyColor.FromRgb(200, 50, 50),
                 FontSize = 9,
                 FontWeight = OxyPlot.FontWeights.Bold,
@@ -2347,7 +2376,13 @@ namespace MaxChemical.Modules.DOE.ViewModels
             [JsonProperty("theoretical_quantiles")] public List<double> TheoreticalQuantiles { get; set; } = new();
             [JsonProperty("ordered_residuals")] public List<double> OrderedResiduals { get; set; } = new();
         }
-
+        private class ParetoResult
+        {
+            [JsonProperty("effects")] public List<ParetoEffectItem> Effects { get; set; } = new();
+            [JsonProperty("log_worth_crit")] public double LogWorthCrit { get; set; } = 1.301;
+            [JsonProperty("alpha")] public double Alpha { get; set; } = 0.05;
+            [JsonProperty("measure")] public string Measure { get; set; } = "LogWorth";
+        }
         private class ResidVsFittedData
         {
             [JsonProperty("fitted")] public List<double> Fitted { get; set; } = new();

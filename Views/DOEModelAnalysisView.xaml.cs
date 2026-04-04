@@ -235,5 +235,15 @@ namespace MaxChemical.Modules.DOE.Views
             double dataX = Math.Max(fMin, Math.Min(fMax, rawX.Value));
             return Math.Round(dataX, 4);
         }
+
+        private void ToggleEquationCoding_Click(object sender, MouseButtonEventArgs e)
+        {
+            if (DataContext is DOEModelAnalysisViewModel vm)
+            {
+                vm.IsCodedEquation = !vm.IsCodedEquation;
+            }
+        }
     }
+
+
 }

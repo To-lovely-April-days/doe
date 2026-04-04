@@ -500,37 +500,48 @@
                         <StackPanel>
                             <Grid Margin="0,0,0,6">
                                 <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Text="回归方程" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                                <TextBlock Grid.Column="0" Text="回归方程" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36" VerticalAlignment="Center"/>
+
+                                <!-- ★ v13 新增: 编码/未编码切换按钮 -->
+                                <Border Grid.Column="1" Margin="12,0,0,0" Padding="8,3" CornerRadius="4" Cursor="Hand"
+                                        Background="#E3F2FD" BorderBrush="#90CAF9" BorderThickness="1"
+                                        MouseLeftButtonDown="ToggleEquationCoding_Click"
+                                        ToolTip="点击切换编码单位/未编码单位（对标 Minitab）">
+                                    <TextBlock Text="{Binding EquationModeText}" FontSize="10" FontWeight="Medium" Foreground="#1565C0"/>
+                                </Border>
+
                                 <!-- 类别因子展开提示 -->
-                                <TextBlock Grid.Column="1" FontSize="10" Foreground="#8A8F9C"
-                       Visibility="{Binding HasCategoricalEquations, Converter={StaticResource BoolToVis}}">
-                <Run Text="按 "/>
-                <Run Text="{Binding CategoricalFactorName, Mode=OneWay}" FontWeight="Medium"/>
-                <Run Text=" 水平展开"/>
+                                <TextBlock Grid.Column="3" FontSize="10" Foreground="#8A8F9C"
+                                           Visibility="{Binding HasCategoricalEquations, Converter={StaticResource BoolToVis}}">
+                                    <Run Text="按 "/>
+                                    <Run Text="{Binding CategoricalFactorName, Mode=OneWay}" FontWeight="Medium"/>
+                                    <Run Text=" 水平展开"/>
                                 </TextBlock>
                             </Grid>
 
                             <!-- 无类别因子: 显示单个方程 -->
-                            <TextBlock Text="{Binding OlsResult.ModelSummary.Equation}"
-                   FontSize="12" FontFamily="Consolas" Foreground="#2C3E50" TextWrapping="Wrap"
-                   Visibility="{Binding HasCategoricalEquations, Converter={StaticResource InverseBoolToVis}}"/>
+                            <TextBlock Text="{Binding CurrentEquationText}"
+                                       FontSize="12" FontFamily="Consolas" Foreground="#2C3E50" TextWrapping="Wrap"
+                                       Visibility="{Binding HasCategoricalEquations, Converter={StaticResource InverseBoolToVis}}"/>
 
                             <!-- 有类别因子: 按水平展开多个方程 -->
                             <ItemsControl ItemsSource="{Binding CategoryEquations}"
-                      Visibility="{Binding HasCategoricalEquations, Converter={StaticResource BoolToVis}}">
+                                          Visibility="{Binding HasCategoricalEquations, Converter={StaticResource BoolToVis}}">
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
                                         <Border Margin="0,0,0,6" Padding="10,6" Background="White" CornerRadius="4"
-                            BorderBrush="#E0E4EA" BorderThickness="1">
+                                                BorderBrush="#E0E4EA" BorderThickness="1">
                                             <StackPanel>
                                                 <TextBlock FontSize="11" FontWeight="SemiBold" Foreground="#0062B8" Margin="0,0,0,3">
-                                <Run Text="{Binding LevelName, Mode=OneWay}"/>
+                                                    <Run Text="{Binding LevelName, Mode=OneWay}"/>
                                                 </TextBlock>
                                                 <TextBlock Text="{Binding Equation}" FontSize="11.5" FontFamily="Consolas"
-                                       Foreground="#2C3E50" TextWrapping="Wrap"/>
+                                                           Foreground="#2C3E50" TextWrapping="Wrap"/>
                                             </StackPanel>
                                         </Border>
                                     </DataTemplate>
@@ -538,6 +549,7 @@
                             </ItemsControl>
                         </StackPanel>
                     </Border>
+
                     <!-- ANOVA 表 -->
                     <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,0,0,12">
                         <StackPanel>

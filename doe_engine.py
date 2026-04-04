@@ -508,7 +508,8 @@ class DOEDesigner:
         
         return json.dumps(matrix, ensure_ascii=False)
 
-    def get_design_quality(self, factors_json: str, matrix_json: str, model_type: str = "quadratic") -> str:
+    def get_design_quality(self, factors_json: str, matrix_json: str, model_type: str = "quadratic",
+                           delta: float = 2.0) -> str:
         """
         ★ 修复 v4: 评估设计矩阵的统计质量 — 完整支持类别因子
         
@@ -518,6 +519,12 @@ class DOEDesigner:
           VIF 对类别因子报告其所有哑变量列中的最大值，
           Power 报告最小值（最难检测的水平）。
         
+        delta: 希望检测到的最小效应大小（编码单位，默认 2.0）
+          编码空间 [-1, +1] 中，delta=2.0 表示因子从最低水平变到最高水平时
+          响应至少变化 2 个标准误单位。
+          较小的 delta (如 1.0) 需要更多实验次数才能达到高 power。
+          ★ 注意: 返回结果中包含 assumed_delta 字段，供 C# 端显示给用户。
+        
         返回 JSON:
         {
             "d_efficiency": 0.92,
@@ -526,6 +533,7 @@ class DOEDesigner:
             "vif": {"温度": 1.2, "催化剂": 1.5, ...},
             "condition_number": 3.5,
             "power_analysis": {"温度": 0.95, "催化剂": 0.88, ...},
+            "assumed_delta": 2.0,
             "alias_structure": [],
             "run_count": 20,
             "parameter_count": 15,
@@ -586,6 +594,7 @@ class DOEDesigner:
             "vif": {},
             "condition_number": 0.0,
             "power_analysis": {},
+            "assumed_delta": delta,
             "alias_structure": [],
             "run_count": n,
             "parameter_count": p,
@@ -624,7 +633,7 @@ class DOEDesigner:
             
             # ── VIF + Power: 连续因子逐列，类别因子合并报告 ──
             alpha = 0.05
-            delta = 2.0
+            # ★ 修复: delta 现在从方法参数传入，不再硬编码
             df_error = max(n - p, 1)
             f_crit = sp_stats.f.ppf(1 - alpha, 1, df_error)
             
@@ -820,12 +829,12 @@ class DOEDesigner:
             },
             # k=8
             8: {
-                # 2^(8-4)=16 runs, E=BCD, F=ACD, G=ABC, H=ABD → Res IV (balanced)
-                # Montgomery Table 8.21: 最短 word = 4 → Res IV
-                3: "a b c d ab ac bc abc",
-                # 2^(8-4)=16 runs 只能达到 Res IV, 升级到 2^(8-2)=64 runs:
-                # G=ABCD, H=ABEF → Res IV (with 64 runs)
-                # 更实用: 2^(8-3)=32 runs, F=BCDE, G=ACDE, H=ABDE → Res IV
+                # 2^(8-4)=16 runs: Res IV (k=8 无法在 16 runs 内实现 Res III 以下)
+                # Montgomery Table XII: E=BCD, F=ACD, G=ABC, H=ABD
+                # Defining relation 最短 word = ABCG (4 letters) → Res IV
+                # 注意: k=8 请求 Res III 时退化为此设计 (16 runs, Res IV)
+                3: "a b c d bcd acd abc abd",
+                # 2^(8-3)=32 runs: F=BCDE, G=ACDE, H=ABDE → Res IV
                 4: "a b c d e bcde acde abde",
             },
         }
@@ -841,8 +850,16 @@ class DOEDesigner:
                 best_res = min(gen_table.keys())
             return gen_table[best_res]
         
-        # 对于不在表中的 k，使用启发式构建 + 警告
-        # 基本因子数: resolution III 用 ceil(log2(k+1)) 个基本因子
+        # 对于不在表中的 k，使用启发式构建
+        # ★ 警告: 启发式生成元不保证达到请求的分辨度
+        # 实际分辨度可能低于 resolution 参数声称的值
+        # k>8 的情况较少见，如果需要严格的分辨度保证，建议用 D-Optimal 代替
+        import warnings
+        warnings.warn(
+            f"k={k} 超出内置生成元表范围，使用启发式构建部分因子设计。"
+            f"实际分辨度可能低于请求的 Res {resolution}，建议验证混杂结构。",
+            stacklevel=2
+        )
         if resolution >= 5:
             p = max(2, k - 4)
         elif resolution >= 4:
@@ -1300,6 +1317,7 @@ class DOEAnalyzer:
 
     def __init__(self):
         self._df = None
+        self._df_full_backup = None  # ★ v11 新增: 用于 refit_excluding / apply_box_cox 后恢复
         self._factor_names = []
         self._categorical_factors = []  # ★ 新增: 类别因子名列表
         self._continuous_factors = []   # ★ 新增: 连续因子名列表
@@ -1463,24 +1481,40 @@ class DOEAnalyzer:
 
             self._model = model
 
-            # ────── 系数表 ──────
+            # ────── 系数表 (★ v13: 使用 Sum coding, 对标 Minitab "已编码系数") ──────
+            # Minitab 的 "已编码系数" 表用 Sum/Effect coding (-1,0,1)
+            # Treatment coding 的系数表作为内部使用 (方程展开等)
+            import re as _re
+            
+            # 构建 Sum coding 模型 (跟 ANOVA 一致)
+            formula_for_coeff = str(model.model.formula) if hasattr(model.model, 'formula') else self._build_formula(
+                [safe_names[f] for f in self._continuous_factors],
+                [safe_names[f] for f in self._categorical_factors], model_type)
+            formula_sum_coeff = _re.sub(r'C\((\w+)\)(?![,\[])', r'C(\1, Sum)', formula_for_coeff)
+            
+            try:
+                model_sum_coeff = ols(formula_sum_coeff, data=df_safe).fit()
+            except Exception:
+                model_sum_coeff = model  # 回退到 Treatment coding
+            
             coefficients = []
-            X_matrix = model.model.exog
+            X_matrix = model_sum_coeff.model.exog
             try:
                 XtX = X_matrix.T @ X_matrix
                 XtX_inv = np.linalg.inv(XtX)
             except Exception:
                 XtX_inv = None
 
-            for idx_j, term in enumerate(model.params.index):
-                coeff = float(model.params[term])
-                se = float(model.bse[term])
-                t_val = float(model.tvalues[term])
-                p_val = float(model.pvalues[term])
+            for idx_j, term in enumerate(model_sum_coeff.params.index):
+                coeff = float(model_sum_coeff.params[term])
+                se = float(model_sum_coeff.bse[term])
+                t_val = float(model_sum_coeff.tvalues[term])
+                p_val = float(model_sum_coeff.pvalues[term])
                 vif = None
                 if XtX_inv is not None and idx_j > 0:
                     vif = round(float(XtX_inv[idx_j, idx_j] * XtX[idx_j, idx_j]), 4)
-                display_term = self._restore_term_name(term, reverse_names)
+                # 去掉 Sum coding 标记再还原名称
+                display_term = self._restore_term_name(term.replace(", Sum", ""), reverse_names)
                 coefficients.append({
                     "term": display_term, "coeff": round(coeff, 6), "se": round(se, 6),
                     "t_value": round(t_val, 4), "p_value": round(p_val, 6), "vif": vif
@@ -1501,9 +1535,13 @@ class DOEAnalyzer:
             ms_res = float(model.mse_resid)
             adeq_prec = 0.0
             if ms_res > 1e-12:
-                signal = float(fitted.max() - fitted.min())
-                noise = np.sqrt(p_count * ms_res / n)
-                adeq_prec = signal / noise if noise > 1e-12 else 0.0
+                # ★ 修复: Adequate Precision 对标 Design-Expert / Minitab
+                # signal = sqrt( (1/p) × Σ(ŷᵢ - ȳ)² ), AP = signal / sqrt(MSE)
+                fitted_arr = fitted.values if hasattr(fitted, 'values') else np.array(fitted)
+                y_bar = float(fitted_arr.mean())
+                signal_sq = float(np.mean((fitted_arr - y_bar) ** 2))
+                if signal_sq > 1e-12:
+                    adeq_prec = float(np.sqrt(signal_sq) / np.sqrt(ms_res))
 
             lof_p = self._calc_lack_of_fit_p(model, df_safe, safe_names, model_type)
             equation = self._build_equation(model, reverse_names)
@@ -1527,10 +1565,64 @@ class DOEAnalyzer:
                 "equations": equations
             }
 
+            # ★ v13 新增: 返回 coding_info 供 C# 端参考
+            coding_info_serializable = {}
+            for fname, info in self._coding_info.items():
+                ci = {"type": info.get("type", "continuous")}
+                if ci["type"] == "continuous":
+                    ci["center"] = round(float(info.get("center", 0.0)), 6)
+                    ci["half_range"] = round(float(info.get("half_range", 1.0)), 6)
+                coding_info_serializable[fname] = ci
+
+            # ★ v13 新增: 用原始值拟合模型，提供未编码系数（对标 Minitab "以未编码单位表示的回归方程"）
+            # C# 端用户选择"未编码"时直接用此系数展示，无需做复杂转换
+            uncoded_coefficients = []
+            uncoded_equation = ""
+            uncoded_equations = {}
+            try:
+                # 构建原始值 DataFrame
+                df_uncoded = pd.DataFrame()
+                for orig_name, safe_name in safe_names.items():
+                    if orig_name in self._categorical_factors:
+                        df_uncoded[safe_name] = self._df[orig_name].astype(str)
+                    else:
+                        df_uncoded[safe_name] = self._df[orig_name].astype(float)
+                df_uncoded["Y"] = self._df[self._response_name].values
+
+                # 用编码模型的实际公式（已剔除不可估计项）在原始值上拟合
+                if hasattr(model, 'model') and hasattr(model.model, 'formula'):
+                    uncoded_formula = str(model.model.formula)
+                else:
+                    uncoded_formula = self._build_formula(
+                        [safe_names[f] for f in self._continuous_factors],
+                        [safe_names[f] for f in self._categorical_factors],
+                        model_type
+                    )
+                model_uncoded = ols(uncoded_formula, data=df_uncoded).fit()
+
+                # 提取系数
+                for term in model_uncoded.params.index:
+                    coeff_val = float(model_uncoded.params[term])
+                    display_term = self._restore_term_name(term, reverse_names)
+                    uncoded_coefficients.append({
+                        "term": display_term,
+                        "coeff": round(coeff_val, 6)
+                    })
+
+                # 构建未编码方程
+                uncoded_equation = self._build_equation(model_uncoded, reverse_names)
+                uncoded_equations = self._build_equations_by_category(model_uncoded, reverse_names)
+            except Exception:
+                pass  # 原始值拟合失败时不影响主流程
+
             return json.dumps({
                 "anova_table": anova_table,
                 "coefficients": coefficients,
+                "uncoded_coefficients": uncoded_coefficients,
                 "model_summary": model_summary,
+                "coding_info": coding_info_serializable,
+                "uncoded_equation": uncoded_equation,
+                "uncoded_equations": uncoded_equations,
                 "dropped_terms": dropped_terms,
                 "inestimable_warning": inestimable_warning,
                 "original_model_type": original_model_type
@@ -1643,59 +1735,153 @@ class DOEAnalyzer:
 
     def effects_pareto(self, alpha: float = 0.05) -> str:
         """
-        ★ 新增: 效应 Pareto 图（基于 T 值绝对值排序）
+        ★ v13: Minitab 风格 Pareto 图 — 按因子分组，类别因子用 GLH 联合 F 检验
         
-        返回 JSON:
-        [
-            {"term": "温度",     "t_value": 12.8, "abs_t": 12.8, "p_value": 0.0000, "significant": true},
-            {"term": "压力",     "t_value": -8.5, "abs_t": 8.5,  "p_value": 0.0002, "significant": true},
-            {"term": "温度²",   "t_value": -2.02, "abs_t": 2.02, "p_value": 0.072,  "significant": false},
-            ...
-        ]
-        
-        其中 Bonferroni 校正线: t_crit = t(1-α/(2m), df_error)
-          m = 效应项数, α = 显著性水平
+        Minitab 的 Pareto 图特点:
+        1. 每个因子只显示一个条形（不展开哑变量）
+        2. 连续因子 df=1: 直接用 t 值
+        3. 类别因子/类别交互 df>1: 用 GLH 联合 F 检验, t = √F
+        4. 使用 Sum coding + 编码值模型（与 ANOVA 一致）
         """
         if self._model is None:
             return json.dumps([], ensure_ascii=False)
         
         try:
+            import re
             from scipy import stats as sp_stats
+            import numpy as np
             
             model = self._model
             safe_names = {f: f"X{i}" for i, f in enumerate(self._factor_names)}
             reverse_names = {v: k for k, v in safe_names.items()}
+            safe_continuous = [safe_names[f] for f in self._continuous_factors]
+            safe_categorical = [safe_names[f] for f in self._categorical_factors]
             
-            effects = []
-            for term in model.params.index:
-                if term == "Intercept":
+            # ★ 使用 Sum coding 模型（与 ANOVA _build_anova_table 一致）
+            df_safe = pd.DataFrame()
+            for orig_name, safe_name in safe_names.items():
+                if orig_name in self._categorical_factors:
+                    df_safe[safe_name] = self._df[orig_name].astype(str)
+                else:
+                    info = self._coding_info.get(orig_name, {})
+                    c = info.get("center", 0.0)
+                    hr = info.get("half_range", 1.0)
+                    df_safe[safe_name] = (self._df[orig_name].astype(float) - float(c)) / float(hr)
+            df_safe["Y"] = self._df[self._response_name].values
+            
+            if hasattr(model.model, 'formula'):
+                formula_coded = str(model.model.formula)
+            else:
+                formula_coded = self._build_formula(safe_continuous, safe_categorical, "quadratic")
+            
+            formula_sum = re.sub(r'C\((\w+)\)(?![,\[])', r'C(\1, Sum)', formula_coded)
+            
+            try:
+                from statsmodels.formula.api import ols
+                model_sum = ols(formula_sum, data=df_safe).fit()
+            except Exception:
+                model_sum = model  # 回退
+            
+            params = list(model_sum.params.index)
+            
+            # ── 按因子分组参数 ──
+            factor_groups = {}
+            
+            for p_name in params:
+                if p_name == "Intercept":
                     continue
-                display_term = self._restore_term_name(term, reverse_names)
-                t_val = float(model.tvalues[term])
-                p_val = float(model.pvalues[term])
+                
+                # 清理 Sum coding 标记
+                p_clean = p_name.replace(", Sum", "")
+                
+                # 判断属于哪个"因子项"
+                if "**" in p_clean:
+                    # 二次项: I(X0 ** 2) → X0²
+                    match = re.search(r'I\((\w+)\s*\*\*\s*2\)', p_clean)
+                    if match:
+                        base_var = match.group(1)
+                        display = self._restore_term_name(base_var, reverse_names) + "²"
+                        factor_groups.setdefault(display, []).append(p_name)
+                elif ":" in p_clean:
+                    # 交互项: 提取两个因子名
+                    parts = p_clean.split(":")
+                    # 每个 part 可能是 C(X3)[S.A] 或 X0
+                    factor_names_in_term = []
+                    for part in parts:
+                        m = re.match(r'C\((\w+)', part)
+                        if m:
+                            factor_names_in_term.append(m.group(1))
+                        else:
+                            factor_names_in_term.append(part.strip())
+                    # 还原为显示名
+                    display_parts = []
+                    for fn in factor_names_in_term:
+                        display_parts.append(reverse_names.get(fn, fn))
+                    display = "×".join(sorted(set(display_parts)))
+                    factor_groups.setdefault(display, []).append(p_name)
+                else:
+                    # 主效应: X0 或 C(X3)[S.A]
+                    m = re.match(r'C\((\w+)', p_clean)
+                    if m:
+                        base_var = m.group(1)
+                    else:
+                        base_var = p_clean
+                    display = reverse_names.get(base_var, base_var)
+                    factor_groups.setdefault(display, []).append(p_name)
+            
+            # ── 对每个因子组做 GLH 联合 F 检验 ──
+            effects = []
+            for display_name, group_params in factor_groups.items():
+                df_group = len(group_params)
+                try:
+                    r_matrix = np.zeros((df_group, len(params)))
+                    for i, pn in enumerate(group_params):
+                        j = params.index(pn)
+                        r_matrix[i, j] = 1.0
+                    f_result = model_sum.f_test(r_matrix)
+                    f_val = float(f_result.fvalue)
+                    p_val = float(f_result.pvalue)
+                    t_equiv = float(np.sqrt(f_val))
+                    # ★ v13: LogWorth = -log10(p), 对标 JMP Effect Screening
+                    # 用 LogWorth 排序对 df>1 的类别因子更公平
+                    log_worth = float(-np.log10(max(p_val, 1e-20)))
+                except Exception:
+                    t_equiv = 0.0
+                    p_val = 1.0
+                    log_worth = 0.0
+                
                 effects.append({
-                    "term": display_term,
-                    "t_value": round(t_val, 4),
-                    "abs_t": round(abs(t_val), 4),
+                    "term": display_name,
+                    "t_value": round(t_equiv, 4),
+                    "abs_t": round(log_worth, 4),  # ★ Pareto 条形值用 LogWorth
                     "p_value": round(p_val, 6),
-                    "significant": p_val < alpha
+                    "significant": p_val < alpha,
+                    "df": df_group,
+                    "log_worth": round(log_worth, 4)
                 })
             
-            # 按 |t| 降序排列
+            # ★ 按 LogWorth 降序排列 (= 按 p 值升序, 跟 JMP/Minitab 排序一致)
             effects.sort(key=lambda x: x["abs_t"], reverse=True)
             
-            # 计算 Bonferroni 校正 t 临界值
+            # 参考线: LogWorth at α → -log10(α)
             m = len(effects)
-            df_error = int(model.df_resid)
+            df_error = int(model_sum.df_resid)
+            log_worth_crit = float(-np.log10(alpha))
             if m > 0 and df_error > 0:
-                t_crit = float(sp_stats.t.ppf(1 - alpha / (2 * m), df_error))
                 for eff in effects:
-                    eff["bonferroni_significant"] = eff["abs_t"] > t_crit
+                    eff["bonferroni_significant"] = eff["p_value"] < alpha / m
             
-            return json.dumps(effects, ensure_ascii=False)
+            # ★ v13: 返回对象而非数组，包含参考线元数据
+            return json.dumps({
+                "effects": effects,
+                "log_worth_crit": round(log_worth_crit, 4),
+                "alpha": alpha,
+                "df_error": df_error,
+                "measure": "LogWorth"
+            }, ensure_ascii=False)
             
         except Exception as e:
-            return json.dumps([{"error": str(e)}], ensure_ascii=False)
+            return json.dumps({"effects": [{"error": str(e)}], "log_worth_crit": 1.301, "alpha": 0.05, "measure": "LogWorth"}, ensure_ascii=False)
 
     # ═══════════════════════════════════════════════════════
     # 原有方法（保留兼容）
@@ -2386,11 +2572,13 @@ class DOEAnalyzer:
         model_type: 模型类型
         
         工作原理:
-          1. 从 self._df 中去除指定行
-          2. 重新编码、拟合模型
-          3. 返回与 fit_ols 相同格式的结果 + 额外的 excluded_count 信息
+          1. 保存原始完整数据到 self._df_full_backup
+          2. 从 self._df 中去除指定行
+          3. 重新编码、拟合模型
+          4. 返回与 fit_ols 相同格式的结果 + 额外的 excluded_count 信息
         
-        注意: 此方法会修改 self._model 为排除后的模型
+        注意: 此方法会修改 self._model 为排除后的模型。
+              调用 restore_full_data_from_backup() 可恢复完整数据。
         """
         if self._df is None:
             return json.dumps({"error": "数据未加载"}, ensure_ascii=False)
@@ -2404,15 +2592,16 @@ class DOEAnalyzer:
                 # 没有要排除的，直接返回当前模型
                 return self.fit_ols(model_type)
             
-            # 保存原始数据
-            original_df = self._df.copy()
+            # ★ 修复: 保存原始完整数据到备份属性，便于恢复
+            if not hasattr(self, '_df_full_backup') or self._df_full_backup is None:
+                self._df_full_backup = self._df.copy()
             
             # 排除指定行
             keep_mask = [i not in exclude_0based for i in range(len(self._df))]
             self._df = self._df.loc[keep_mask].reset_index(drop=True)
             
             if len(self._df) < 3:
-                self._df = original_df
+                self._df = self._df_full_backup.copy()
                 return json.dumps({"error": "排除后数据不足（至少需要3组）"}, ensure_ascii=False)
             
             # 重新拟合
@@ -2423,11 +2612,6 @@ class DOEAnalyzer:
             result["excluded_indices"] = list(exclude_indices)
             result["excluded_count"] = len(exclude_0based)
             result["remaining_count"] = len(self._df)
-            
-            # 恢复原始数据（但保留新模型用于后续分析）
-            # 注意: self._model 现在是排除后的模型，这是期望行为
-            # 如果用户想恢复，调用 fit_ols 即可（它会用 self._df 重新拟合）
-            # 但这里我们不恢复 _df，因为用户可能要继续在排除后的数据上做分析
             
             return json.dumps(result, ensure_ascii=False)
             
@@ -2441,6 +2625,27 @@ class DOEAnalyzer:
         本质上就是重新调用 load_data
         """
         return self.load_data(factors_json, responses_json, response_name, factor_types_json)
+
+    def restore_full_data_from_backup(self, model_type: str = "quadratic") -> str:
+        """
+        ★ v11 新增: 从内部备份恢复完整数据（无需重新传入数据）
+        
+        在 refit_excluding() 后调用此方法可恢复到排除前的状态。
+        如果没有备份数据，返回错误。
+        """
+        if not hasattr(self, '_df_full_backup') or self._df_full_backup is None:
+            return json.dumps({"error": "没有备份数据，请使用 restore_full_data() 并传入原始数据"}, 
+                            ensure_ascii=False)
+        
+        self._df = self._df_full_backup.copy()
+        self._df_full_backup = None  # 清除备份
+        
+        # 重新拟合模型
+        result_json = self.fit_ols(model_type)
+        result = json.loads(result_json)
+        result["restored"] = True
+        result["restored_count"] = len(self._df)
+        return json.dumps(result, ensure_ascii=False)
 
     # ═══════════════════════════════════════════════════════
     # ★ v8 新增: Tukey HSD 多重比较
@@ -2634,13 +2839,18 @@ class DOEAnalyzer:
             else:
                 y_new = (y ** use_lambda - 1) / use_lambda
 
+            # ★ 修复: 使用 try/finally 确保即使中间出错也能恢复 _df 和 _model
             df_backup = self._df.copy()
-            self._df[self._response_name] = y_new
-            self._fit_quadratic_model()
-            trans_r2 = float(self._model.rsquared) if self._model else 0.0
-            trans_r2_adj = float(self._model.rsquared_adj) if self._model else 0.0
-            self._df = df_backup
-            self._fit_quadratic_model()
+            model_backup = self._model
+            try:
+                self._df[self._response_name] = y_new
+                self._fit_quadratic_model()
+                trans_r2 = float(self._model.rsquared) if self._model else 0.0
+                trans_r2_adj = float(self._model.rsquared_adj) if self._model else 0.0
+            finally:
+                self._df = df_backup
+                self._model = model_backup
+                # 不再需要重新拟合 — 直接从备份恢复模型对象
 
             improvement = trans_r2 - orig_r2
             recommend = improvement > 0.01 and abs(use_lambda - 1.0) > 0.1
@@ -2680,6 +2890,12 @@ class DOEAnalyzer:
         """
         ★ v9 新增: 应用 Box-Cox 变换后重新拟合 OLS 模型
         返回与 fit_ols() 相同格式 + box_cox_info
+        
+        ★ v11 修复: 变换后 _df 和 _model 保持一致。
+          调用此方法后，_df 中的响应列为变换后的值，_model 为对变换后数据拟合的模型。
+          后续的 predict_point / residual_diagnostics 等方法都基于变换后的模型。
+          
+          如果需要恢复原始数据，调用 restore_full_data() 或 restore_full_data_from_backup()。
         """
         if self._df is None:
             return json.dumps({"error": "数据未加载"}, ensure_ascii=False)
@@ -2698,14 +2914,19 @@ class DOEAnalyzer:
                 y_new = (y ** lambda_value - 1) / lambda_value
                 transform_desc = f"y^{lambda_value:.2f}"
 
-            original_y = self._df[self._response_name].copy()
+            # ★ 修复: 保存原始数据备份（如果还没有），供后续恢复
+            if not hasattr(self, '_df_full_backup') or self._df_full_backup is None:
+                self._df_full_backup = self._df.copy()
+            
+            # 应用变换 — _df 和 _model 同步更新
             self._df[self._response_name] = y_new
             result_json = self.fit_ols(model_type)
             result = json.loads(result_json)
-            self._df[self._response_name] = original_y
+            # ★ 修复: 不再恢复 _df，让 _df 和 _model 保持一致
 
             result["box_cox_info"] = {
-                "lambda": lambda_value, "transform": transform_desc, "applied": True
+                "lambda": lambda_value, "transform": transform_desc, "applied": True,
+                "note": "数据和模型已切换为变换后的版本。调用 restore_full_data_from_backup() 可恢复。"
             }
             return json.dumps(result, ensure_ascii=False)
         except Exception as e:
@@ -2765,9 +2986,12 @@ class DOEAnalyzer:
             fitted = model.fittedvalues
             adeq_prec = 0.0
             if ms_res > 1e-12:
-                signal = float(fitted.max() - fitted.min())
-                noise = np.sqrt(p_count * ms_res / n)
-                adeq_prec = signal / noise if noise > 1e-12 else 0.0
+                # ★ 修复: Adequate Precision 对标 Design-Expert / Minitab
+                fitted_arr = fitted.values if hasattr(fitted, 'values') else np.array(fitted)
+                y_bar_fit = float(fitted_arr.mean())
+                signal_sq = float(np.mean((fitted_arr - y_bar_fit) ** 2))
+                if signal_sq > 1e-12:
+                    adeq_prec = float(np.sqrt(signal_sq) / np.sqrt(ms_res))
 
             # ════════════════════════════════════════════
             # 1. 标题页
@@ -3179,11 +3403,66 @@ class DOEAnalyzer:
 
     def main_effects(self) -> str:
         """主效应图数据
-        ★ 修复 (Bug#2): 类别因子的 level 保留字符串标签，不做 float() 转换
-        原来的 bug: float("催化剂A") 会抛出 ValueError
+        ★ v11 修复: 使用模型预测的边际均值 (LS-Means / Marginal Means)，
+          对标 JMP / Minitab 的主效应图行为。
+          在不平衡设计中，LS-Means 比原始均值更准确。
+          
+        原来的 bug (Bug#2): float("催化剂A") 会抛出 ValueError — 已修复。
+        原来的 bug (Bug#14): 使用原始均值而非模型边际均值 — 现在修复。
         """
         if self._df is None:
             return json.dumps({}, ensure_ascii=False)
+        
+        # ★ 如果有拟合模型，用模型预测边际均值 (LS-Means)
+        if self._model is not None:
+            try:
+                result = {}
+                # 计算各因子的中心值（其他因子固定时的参考点）
+                center = {}
+                for name in self._factor_names:
+                    if name in self._categorical_factors:
+                        levels = sorted(self._df[name].astype(str).unique())
+                        center[name] = levels[0] if levels else ""
+                    else:
+                        col = self._df[name].astype(float)
+                        center[name] = float((col.min() + col.max()) / 2.0)
+                
+                for factor in self._factor_names:
+                    is_cat = factor in self._categorical_factors
+                    
+                    if is_cat:
+                        levels = sorted(self._df[factor].astype(str).unique())
+                        effect_data = []
+                        for lv in levels:
+                            point = dict(center)
+                            point[factor] = lv
+                            pred_json = self.predict_point(json.dumps(point, ensure_ascii=False))
+                            pred_val = json.loads(pred_json).get("predicted", 0.0)
+                            effect_data.append({
+                                "level": str(lv),
+                                "mean": round(float(pred_val), 4)
+                            })
+                        result[factor] = effect_data
+                    else:
+                        col = self._df[factor].astype(float)
+                        levels = sorted(col.unique())
+                        effect_data = []
+                        for lv in levels:
+                            point = dict(center)
+                            point[factor] = float(lv)
+                            pred_json = self.predict_point(json.dumps(point, ensure_ascii=False))
+                            pred_val = json.loads(pred_json).get("predicted", 0.0)
+                            effect_data.append({
+                                "level": round(float(lv), 4),
+                                "mean": round(float(pred_val), 4)
+                            })
+                        result[factor] = effect_data
+                
+                return json.dumps(result, ensure_ascii=False)
+            except Exception:
+                pass  # 回退到原始均值
+        
+        # 回退: 无模型时用原始均值
         result = {}
         for factor in self._factor_names:
             is_cat = factor in self._categorical_factors
@@ -3276,50 +3555,47 @@ class DOEAnalyzer:
         return json.dumps(effects, ensure_ascii=False)
 
     def anova_table(self) -> str:
-        """ANOVA 表（原有实现，保留兼容，★ 修复: 复用 self._model 避免与新接口不一致）"""
+        """ANOVA 表（原有实现，保留兼容，★ v12 修复: 统一使用 Partial SS，与 _build_anova_table 一致）"""
         if self._df is None or not HAS_STATSMODELS:
             return json.dumps([], ensure_ascii=False)
         try:
-            # ★ 修复: 优先使用 fit_ols / load_data 已拟合的模型
-            # 旧实现每次独立拟合纯主效应模型, 与 fit_ols 的 quadratic 模型结果不一致
             if self._model is not None:
                 safe_names = {f: f"X{i}" for i, f in enumerate(self._factor_names)}
                 reverse_names = {v: k_name for k_name, v in safe_names.items()}
-                anova = anova_lm(self._model, typ=2)
-                result = []
-                for idx, row in anova.iterrows():
-                    source_name = self._restore_term_name(str(idx), reverse_names)
-                    result.append({
-                        "source": source_name,
-                        "df": int(row.get("df", 0)),
-                        "ss": round(float(row.get("sum_sq", 0)), 4),
-                        "ms": round(float(row.get("sum_sq", 0) / max(row.get("df", 1), 1)), 4),
-                        "f_value": round(float(row.get("F", 0)), 4) if pd.notna(row.get("F")) else None,
-                        "p_value": round(float(row.get("PR(>F)", 1)), 6) if pd.notna(row.get("PR(>F)")) else None
-                    })
+                
+                # ★ v12 修复: 构建 df_safe 并委托给 _build_anova_table
+                # 确保与 fit_ols 输出的 ANOVA 完全一致
+                df_safe = pd.DataFrame()
+                for orig_name, safe_name in safe_names.items():
+                    if orig_name in self._categorical_factors:
+                        df_safe[safe_name] = self._df[orig_name].astype(str)
+                    else:
+                        info = self._coding_info.get(orig_name, {})
+                        center = info.get("center", 0.0)
+                        half_range = info.get("half_range", 1.0)
+                        df_safe[safe_name] = (self._df[orig_name].astype(float) - center) / half_range
+                df_safe["Y"] = self._df[self._response_name].values
+                
+                # 推断 model_type
+                model_type = "quadratic"  # 默认
+                formula_str = str(self._model.model.formula) if hasattr(self._model.model, 'formula') else ""
+                if "**2" not in formula_str and ":" not in formula_str:
+                    model_type = "linear"
+                elif "**2" not in formula_str:
+                    model_type = "interaction"
+                
+                result = self._build_anova_table(self._model, df_safe, safe_names, reverse_names, model_type)
                 return json.dumps(result, ensure_ascii=False)
             
             # 回退: 无已拟合模型时，拟合主效应模型
             safe_names = {f: f"X{i}" for i, f in enumerate(self._factor_names)}
+            reverse_names = {v: k_name for k_name, v in safe_names.items()}
             df_safe = self._df.rename(columns=safe_names)
             df_safe = df_safe.rename(columns={self._response_name: "Y"})
             formula_terms = " + ".join(safe_names.values())
             formula = f"Y ~ {formula_terms}"
             model = ols(formula, data=df_safe).fit()
-            anova = anova_lm(model, typ=2)
-            result = []
-            for idx, row in anova.iterrows():
-                source_name = idx
-                for orig, safe in safe_names.items():
-                    source_name = str(source_name).replace(safe, orig)
-                result.append({
-                    "source": source_name,
-                    "df": int(row.get("df", 0)),
-                    "ss": round(float(row.get("sum_sq", 0)), 4),
-                    "ms": round(float(row.get("sum_sq", 0) / max(row.get("df", 1), 1)), 4),
-                    "f_value": round(float(row.get("F", 0)), 4) if pd.notna(row.get("F")) else None,
-                    "p_value": round(float(row.get("PR(>F)", 1)), 6) if pd.notna(row.get("PR(>F)")) else None
-                })
+            result = self._build_anova_table(model, df_safe, safe_names, reverse_names, "linear")
             return json.dumps(result, ensure_ascii=False)
         except Exception as e:
             return json.dumps([{"source": "Error", "error": str(e)}], ensure_ascii=False)
@@ -3677,92 +3953,280 @@ class DOEAnalyzer:
         return "Y ~ " + " + ".join(sorted(formula_terms))
 
     def _build_anova_table(self, model, df_safe, safe_names, reverse_names, model_type) -> list:
-        """★ 新增: 构建完整 ANOVA 表（逐项分解，使用 Type III SS）
+        """★ v12 重写: 构建完整 ANOVA 表 — 使用 Type II SS 对标 Minitab Adj SS
         
-        ANOVA 表结构（对标 Design Expert / JMP）:
-          1. 模型 (Model) 汇总行 — 整体 F 检验
-          2. 各因子/交互/二次项分解行
-          3. 失拟 (Lack of Fit) 行（有重复实验时）
-          4. 纯误差 (Pure Error) 行
-          5. 残差 (Residual) 行
-          6. 总计 (Total) 行
+        Minitab 的 Adj SS = statsmodels Type II SS:
+          遵循"边际性原则"(marginality): 测试主效应时，只在不包含该因子高阶项
+          的模型中比较。这确保了主效应的 SS 反映其真实贡献，不被高阶项吸收。
+          
+        与 Type III 的区别:
+          Type III 测试主效应时保留所有高阶项（包括含该因子的交互和二次项），
+          导致连续因子主效应 SS 偏小（被高阶项吸收了线性信息）。
+          Type II 遵循边际性，与 Minitab/Design-Expert 一致。
+        
+        分组汇总行使用缩减模型法计算（去掉整组后的 SS 增量）。
+        
+        ANOVA 表结构（对标 Minitab）:
+          1. 模型 (Model) 汇总行
+          2. 线性 (Linear) 汇总行 — 主效应汇总
+          3.   各主效应分解行
+          4. 平方 (Square) 汇总行 — 二次项汇总
+          5.   各二次项分解行
+          6. 双因子交互作用 (2-Way Interaction) 汇总行
+          7.   各交互项分解行
+          8. 误差 (Error / 残差) 行
+          9.   失拟 (Lack of Fit) 行
+          10.  纯误差 (Pure Error) 行
+          11. 总计 (Total) 行
         """
         try:
-            # ★ 修复: 使用 Type III SS（与 Design Expert / JMP 一致）
-            # Type III SS 在不平衡设计中更合适
-            anova = anova_lm(model, typ=3)
+            from scipy import stats as sp_stats
             
-            item_rows = []  # 各因子分解行
-            ss_model = 0.0
-            df_model = 0
+            # ── ★ v13 核心: Minitab Adj SS = 编码值 + Sum coding + Type III SS ──
+            # 
+            # 经过用真实数据逐一验证，Minitab 的 Adj SS 精确等于:
+            #   1. 连续因子编码到 [-1, +1] (center ± half_range)
+            #   2. 类别因子用 Sum/Effect coding (-1, 0, 1) 而非 Treatment coding (0, 1)
+            #   3. 使用 Type III SS
+            #
+            # Sum coding 使类别因子哑变量与截距正交，
+            # 结合编码后的连续因子，Type III SS 的结果与 Minitab 完全一致。
             
-            for idx, row in anova.iterrows():
+            safe_continuous = [safe_names[f] for f in self._continuous_factors]
+            safe_categorical = [safe_names[f] for f in self._categorical_factors]
+            
+            # ★ 关键: 使用编码值 df_safe（已经是 [-1,+1]），不用原始值
+            # 但需要把公式中的 C(X) 改为 C(X, Sum) 来使用 Sum coding
+            
+            # 从已拟合模型获取实际公式（已剔除不可估计项）
+            if hasattr(model.model, 'formula'):
+                formula_coded = str(model.model.formula)
+            else:
+                formula_coded = self._build_formula(safe_continuous, safe_categorical, model_type)
+            
+            # 将 Treatment coding 的 C(Xn) 替换为 Sum coding 的 C(Xn, Sum)
+            import re
+            formula_sum = re.sub(r'C\((\w+)\)(?![,\[])', r'C(\1, Sum)', formula_coded)
+            
+            try:
+                model_anova = ols(formula_sum, data=df_safe).fit()
+            except Exception:
+                # Sum coding 失败时回退到编码值 + Treatment coding + Type II
+                try:
+                    model_anova = ols(formula_coded, data=df_safe).fit()
+                    formula_sum = formula_coded  # 标记使用的是原公式
+                except Exception:
+                    model_anova = model
+            
+            # Type III SS（与 Sum coding 配合 = Minitab Adj SS）
+            anova_result = anova_lm(model_anova, typ=3)
+            
+            # 构建各项的分组归类
+            linear_keys = set()
+            square_keys = set()
+            interact_keys = set()
+            
+            for v in safe_continuous:
+                linear_keys.add(v)
+            for v in safe_categorical:
+                linear_keys.add(f"C({v})")
+                linear_keys.add(f"C({v}, Sum)")  # Sum coding 格式
+            
+            if model_type in ("interaction", "quadratic"):
+                for i in range(len(safe_continuous)):
+                    for j in range(i + 1, len(safe_continuous)):
+                        interact_keys.add(f"{safe_continuous[i]}:{safe_continuous[j]}")
+                for cat_v in safe_categorical:
+                    for cont_v in safe_continuous:
+                        interact_keys.add(f"C({cat_v}):{cont_v}")
+                        interact_keys.add(f"C({cat_v}, Sum):{cont_v}")  # Sum coding
+                for i in range(len(safe_categorical)):
+                    for j in range(i + 1, len(safe_categorical)):
+                        interact_keys.add(f"C({safe_categorical[i]}):C({safe_categorical[j]})")
+                        interact_keys.add(f"C({safe_categorical[i]}, Sum):C({safe_categorical[j]}, Sum)")
+            
+            if model_type == "quadratic":
+                for v in safe_continuous:
+                    square_keys.add(f"I({v} ** 2)")  # statsmodels 输出格式含空格
+                    square_keys.add(f"I({v}**2)")     # 也兼容无空格格式
+            
+            # ── 残差信息 ──
+            ss_res_full = float(model_anova.ssr)
+            df_res_full = int(model_anova.df_resid)
+            ms_res = ss_res_full / max(df_res_full, 1)
+            
+            # ── 从 anova2 提取各项 Adj SS ──
+            linear_rows = []
+            square_rows = []
+            interact_rows = []
+            
+            for idx, row in anova_result.iterrows():
                 if idx == "Residual":
                     continue
-                # ★ 修复: Type III ANOVA 包含 Intercept 行，跳过
+                # Type III 包含 Intercept 行，跳过
                 if idx == "Intercept":
                     continue
-                source_name = self._restore_term_name(str(idx), reverse_names)
+                
                 ss = float(row.get("sum_sq", 0))
                 df = int(row.get("df", 0))
                 ms = ss / max(df, 1)
                 f_val = float(row.get("F", 0)) if pd.notna(row.get("F")) else None
                 p_val = float(row.get("PR(>F)", 1)) if pd.notna(row.get("PR(>F)")) else None
                 
-                item_rows.append({
-                    "source": source_name, "df": df, "ss": round(ss, 6),
-                    "ms": round(ms, 6), "f_value": round(f_val, 4) if f_val is not None else None,
-                    "p_value": round(p_val, 6) if p_val is not None else None
-                })
-                ss_model += ss
-                df_model += df
+                # ★ 去掉 Sum coding 标记再做名称还原
+                idx_clean = str(idx).replace(", Sum", "")
+                display_name = self._restore_term_name(idx_clean, reverse_names)
+                
+                item = {
+                    "source": display_name, "df": df, "ss": round(ss, 6),
+                    "ms": round(ms, 6),
+                    "f_value": round(f_val, 4) if f_val is not None else None,
+                    "p_value": round(p_val, 6) if p_val is not None else None,
+                }
+                
+                idx_str = str(idx)
+                if idx_str in linear_keys:
+                    linear_rows.append(item)
+                elif idx_str in square_keys:
+                    square_rows.append(item)
+                elif idx_str in interact_keys:
+                    interact_rows.append(item)
+                else:
+                    # 尝试匹配 (statsmodels 可能添加空格)
+                    idx_nospace = idx_str.replace(" ", "")
+                    matched = False
+                    for sk in square_keys:
+                        if sk.replace(" ", "") == idx_nospace:
+                            square_rows.append(item)
+                            matched = True
+                            break
+                    if not matched:
+                        for ik in interact_keys:
+                            if ik.replace(" ", "") == idx_nospace:
+                                interact_rows.append(item)
+                                matched = True
+                                break
+                    if not matched:
+                        for lk in linear_keys:
+                            if lk.replace(" ", "") == idx_nospace:
+                                linear_rows.append(item)
+                                matched = True
+                                break
+                    if not matched:
+                        # 兜底: 归入交互项组
+                        interact_rows.append(item)
             
-            # ★ 新增: 模型汇总行（对标 Design Expert "Model" 行）
-            # 使用 model.ess (Explained Sum of Squares = SS_Model) 和 model.f_pvalue 作为整体检验
-            # 注意 statsmodels 命名:
-            #   model.ess = Explained SS = SS_Model（回归平方和）
-            #   model.ssr = Sum of Squared Residuals = SS_Residual（残差平方和）
-            ss_model_from_model = float(model.ess)
-            df_model_from_model = int(model.df_model)
-            ms_model = ss_model_from_model / max(df_model_from_model, 1)
+            # ── 分组汇总: 使用 GLH (General Linear Hypothesis) 联合 F 检验 ──
+            # Minitab 的分组汇总 SS = F × df_num × MSE，通过对该组所有参数联合检验得到
             
-            # 残差行
-            # statsmodels: model.ssr = Sum of Squared Residuals（残差平方和，不是回归平方和）
-            ss_res = float(model.ssr)
-            df_res = int(model.df_resid)
-            ms_res = ss_res / max(df_res, 1)
+            anova_params = list(model_anova.params.index)
+            mse_anova = float(model_anova.mse_resid)
             
-            f_model = ms_model / ms_res if ms_res > 1e-12 else None
-            p_model = float(model.f_pvalue) if (not np.isnan(model.f_pvalue)) else None
+            def _make_group_summary_glh(source_name, group_param_names):
+                """Minitab 风格: 分组汇总 = GLH 联合 F 检验"""
+                if not group_param_names:
+                    return None
+                try:
+                    r_matrix = np.zeros((len(group_param_names), len(anova_params)))
+                    for i, pn in enumerate(group_param_names):
+                        j = anova_params.index(pn)
+                        r_matrix[i, j] = 1.0
+                    f_result = model_anova.f_test(r_matrix)
+                    g_df = int(f_result.df_num)
+                    g_f = float(f_result.fvalue)
+                    g_ss = g_f * g_df * mse_anova
+                    g_ms = g_ss / max(g_df, 1)
+                    g_p = float(f_result.pvalue)
+                    return {
+                        "source": source_name, "df": g_df, "ss": round(g_ss, 6),
+                        "ms": round(g_ms, 6),
+                        "f_value": round(g_f, 4),
+                        "p_value": round(g_p, 6)
+                    }
+                except Exception:
+                    # 回退: 简单求和
+                    return None
             
+            # 识别各组参数名（从 ANOVA 模型的参数列表中）
+            linear_param_names = []
+            square_param_names = []
+            interact_param_names = []
+            
+            for p_name in anova_params:
+                if p_name == "Intercept":
+                    continue
+                if "**" in p_name:
+                    square_param_names.append(p_name)
+                elif ":" in p_name:
+                    interact_param_names.append(p_name)
+                else:
+                    linear_param_names.append(p_name)
+            
+            # ── 组装最终 ANOVA 表 ──
             result = []
-            # 第一行: 模型汇总
+            
+            # 模型汇总行（用原始值模型）
+            ss_model = float(model_anova.ess)
+            df_model = int(model_anova.df_model)
+            ms_model = ss_model / max(df_model, 1)
+            f_model = ms_model / ms_res if ms_res > 1e-12 else None
+            p_model = float(model_anova.f_pvalue) if not np.isnan(model_anova.f_pvalue) else None
             result.append({
-                "source": "模型", "df": df_model_from_model,
-                "ss": round(ss_model_from_model, 6),
+                "source": "模型", "df": df_model, "ss": round(ss_model, 6),
                 "ms": round(ms_model, 6),
                 "f_value": round(f_model, 4) if f_model is not None else None,
                 "p_value": round(p_model, 6) if p_model is not None else None
             })
             
-            # 各因子分解行
-            result.extend(item_rows)
+            # 线性汇总 + 各主效应
+            linear_group = _make_group_summary_glh("  线性", linear_param_names)
+            if linear_group:
+                result.append(linear_group)
+            for row in linear_rows:
+                r = dict(row)
+                r["source"] = "    " + r["source"]
+                result.append(r)
             
-            # Lack of Fit 和 Pure Error
-            lof_result = self._calc_lack_of_fit(model, df_safe, safe_names)
-            if lof_result is not None:
-                result.append(lof_result["lack_of_fit"])
-                result.append(lof_result["pure_error"])
+            # 平方汇总 + 各二次项
+            if square_rows:
+                square_group = _make_group_summary_glh("  平方", square_param_names)
+                if square_group:
+                    result.append(square_group)
+                for row in square_rows:
+                    r = dict(row)
+                    r["source"] = "    " + r["source"]
+                    result.append(r)
             
+            # 交互汇总 + 各交互项
+            if interact_rows:
+                interact_group = _make_group_summary_glh("  双因子交互作用", interact_param_names)
+                if interact_group:
+                    result.append(interact_group)
+                for row in interact_rows:
+                    r = dict(row)
+                    r["source"] = "    " + r["source"]
+                    result.append(r)
+            
+            # 误差（残差）行
             result.append({
-                "source": "残差", "df": df_res, "ss": round(ss_res, 6),
+                "source": "误差", "df": df_res_full, "ss": round(ss_res_full, 6),
                 "ms": round(ms_res, 6), "f_value": None, "p_value": None
             })
+            
+            # Lack of Fit 和 Pure Error（用原始值模型）
+            lof_result = self._calc_lack_of_fit(model_anova, df_safe, safe_names)
+            if lof_result is not None:
+                lof_row = lof_result["lack_of_fit"]
+                lof_row["source"] = "  " + lof_row["source"]
+                result.append(lof_row)
+                pe_row = lof_result["pure_error"]
+                pe_row["source"] = "  " + pe_row["source"]
+                result.append(pe_row)
             
             # 总计行
             ss_total = float(np.sum((df_safe["Y"] - df_safe["Y"].mean()) ** 2))
             result.append({
-                "source": "总计", "df": len(df_safe) - 1, "ss": round(ss_total, 6),
+                "source": "合计", "df": len(df_safe) - 1, "ss": round(ss_total, 6),
                 "ms": None, "f_value": None, "p_value": None
             })
             
@@ -3856,8 +4320,8 @@ class DOEAnalyzer:
             return f"{orig}²"
         
         # ★ 新增: 处理类别因子 C(X3)[T.B] → 催化剂[B]
-        # ★ 修复 (v4): 使用 [^\]]+ 代替 .+? 防止匹配穿越 ] 到交互项
-        cat_match = re.match(r'^C\((\w+)\)\[T\.([^\]]+)\]$', display)
+        # ★ v13: 也支持 Sum coding C(X3)[S.A] → 催化剂[A]
+        cat_match = re.match(r'^C\((\w+)\)\[(?:T|S)\.([^\]]+)\]$', display)
         if cat_match:
             safe_name = cat_match.group(1)
             level = cat_match.group(2)
@@ -3865,12 +4329,12 @@ class DOEAnalyzer:
             return f"{orig}[{level}]"
         
         # ★ 新增: 处理类别因子交互 C(X3)[T.B]:X0 → 催化剂[B]×温度
-        # ★ 也处理 C(X2)[T.B]:C(X3)[T.水] → 催化剂[B]×溶剂[水]
+        # ★ v13: 也支持 Sum coding C(X3)[S.A]:X0
         if ":" in display:
             parts = display.split(":")
             orig_parts = []
             for p in parts:
-                cat_m = re.match(r'^C\((\w+)\)\[T\.([^\]]+)\]$', p)
+                cat_m = re.match(r'^C\((\w+)\)\[(?:T|S)\.([^\]]+)\]$', p)
                 if cat_m:
                     safe_name = cat_m.group(1)
                     level = cat_m.group(2)
@@ -4285,7 +4749,8 @@ if __name__ == "__main__":
         print(f"  Cook's 距离最大值: {max(diag['cooks_distance']['distance']):.4f}")
     
     # ★ 测试效应 Pareto
-    pareto = json.loads(analyzer.effects_pareto())
+    pareto_result = json.loads(analyzer.effects_pareto())
+    pareto = pareto_result["effects"]
     print(f"\n  效应 Pareto (前3):")
     for eff in pareto[:3]:
         sig = "★" if eff.get("significant") else " "

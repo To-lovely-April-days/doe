@@ -1186,7 +1186,6 @@ namespace MaxChemical.Modules.DOE.ViewModels
             var sorted = _paretoTerms.OrderByDescending(t => t.AbsT).ToList();
             int termCount = sorted.Count;
 
-            // ── 动态计算左边距（按最长项名估算像素宽度）──
             int maxLabelLen = sorted.Max(t => t.TermName.Length);
             double leftMargin = Math.Max(100, Math.Min(220, maxLabelLen * 7.5 + 20));
 
@@ -1198,80 +1197,23 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 Subtitle = "点击条形可切换保留/删除 — 蓝色=保留, 灰色=删除",
                 SubtitleFontSize = 9,
                 SubtitleColor = OxyColor.FromRgb(140, 140, 140),
-                PlotMargins = new OxyThickness(leftMargin, 35, 40, 40),
+                PlotMargins = new OxyThickness(leftMargin, 35, 60, 50),
                 PlotAreaBorderThickness = new OxyThickness(1, 0, 0, 1),
                 PlotAreaBorderColor = OxyColor.FromRgb(200, 200, 200)
             };
 
-            // ── Y 轴: 项名 ──
             var catAxis = new CategoryAxis
             {
                 Position = AxisPosition.Left,
-                GapWidth = termCount > 12 ? 0.15 : 0.3,   // 项多时收窄间距
+                GapWidth = termCount > 12 ? 0.15 : 0.3,
                 FontSize = termCount > 15 ? 9.5 : 10.5,
                 TextColor = OxyColor.FromRgb(60, 60, 60),
-                TickStyle = TickStyle.None,                  // 去掉刻度线
+                TickStyle = TickStyle.None,
                 AxislineStyle = LineStyle.None
             };
-            // OxyPlot CategoryAxis 从下往上排列，反转以得到从上到下降序
             for (int i = sorted.Count - 1; i >= 0; i--)
                 catAxis.Labels.Add(sorted[i].TermName);
 
-            // ── X 轴: |t| 值 ──
-            double maxT = sorted.Count > 0 ? sorted[0].AbsT : 5;
-            var valAxis = new LinearAxis
-            {
-                Position = AxisPosition.Bottom,
-                Title = "标准化效应 |t|",
-                TitleFontSize = 10,
-                Minimum = 0,
-                AbsoluteMinimum = 0,
-                Maximum = maxT * 1.12,           // 留出标签空间
-                FontSize = 10,
-                MajorGridlineStyle = LineStyle.Dot,
-                MajorGridlineColor = OxyColor.FromRgb(230, 230, 230),
-                TickStyle = TickStyle.Outside
-            };
-
-            model.Axes.Add(catAxis);
-            model.Axes.Add(valAxis);
-
-            // ── 条形系列 ──
-            var series = new BarSeries
-            {
-                StrokeThickness = 0.8,
-                StrokeColor = OxyColor.FromRgb(160, 160, 160),
-                LabelPlacement = LabelPlacement.Outside,     // 标签放外面
-                LabelFormatString = "{0:F2}",
-                LabelMargin = 4,
-                FontSize = termCount > 15 ? 8 : 9
-            };
-
-            // 反转遍历以匹配 CategoryAxis 顺序
-            for (int i = sorted.Count - 1; i >= 0; i--)
-            {
-                var item = sorted[i];
-                OxyColor color;
-                if (!item.IsIncluded)
-                {
-                    // 已删除: 浅灰半透明
-                    color = OxyColor.FromArgb(100, 200, 200, 200);
-                }
-                else if (item.IsSignificant)
-                {
-                    // 保留 + 显著: 深蓝
-                    color = OxyColor.FromRgb(66, 133, 244);
-                }
-                else
-                {
-                    // 保留 + 不显著: 浅蓝
-                    color = OxyColor.FromRgb(160, 196, 255);
-                }
-                series.Items.Add(new BarItem { Value = item.AbsT, Color = color });
-            }
-            model.Series.Add(series);
-
-            // ── 红色虚线: t 临界值（精确计算）──
             double tCrit = 2.08;
             if (OlsResult?.AnovaTable != null)
             {
@@ -1286,6 +1228,51 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 }
             }
 
+            double maxT = sorted.Count > 0 ? sorted[0].AbsT : 5;
+            double xMax = Math.Max(maxT, tCrit) * 1.25;
+
+            var valAxis = new LinearAxis
+            {
+                Position = AxisPosition.Bottom,
+                Title = "标准化效应 |t|",
+                TitleFontSize = 10,
+                Minimum = 0,
+                AbsoluteMinimum = 0,
+                Maximum = xMax,
+                FontSize = 10,
+                MajorGridlineStyle = LineStyle.Dot,
+                MajorGridlineColor = OxyColor.FromRgb(230, 230, 230),
+                TickStyle = TickStyle.Outside
+            };
+
+            model.Axes.Add(catAxis);
+            model.Axes.Add(valAxis);
+
+            var series = new BarSeries
+            {
+                StrokeThickness = 0.8,
+                StrokeColor = OxyColor.FromRgb(160, 160, 160),
+                LabelPlacement = LabelPlacement.Outside,
+                LabelFormatString = "{0:F2}",
+                LabelMargin = 4,
+                FontSize = termCount > 15 ? 8 : 9
+            };
+
+            for (int i = sorted.Count - 1; i >= 0; i--)
+            {
+                var item = sorted[i];
+                OxyColor color;
+                if (!item.IsIncluded)
+                    color = OxyColor.FromArgb(100, 200, 200, 200);
+                else if (item.IsSignificant)
+                    color = OxyColor.FromRgb(66, 133, 244);
+                else
+                    color = OxyColor.FromRgb(160, 196, 255);
+                series.Items.Add(new BarItem { Value = item.AbsT, Color = color });
+            }
+            model.Series.Add(series);
+
+            // ── 红色虚线 + 文字（放在线的中间位置，避开条形和边界裁切）──
             var critLine = new LineAnnotation
             {
                 Type = LineAnnotationType.Vertical,
@@ -1293,12 +1280,14 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 Color = OxyColor.FromArgb(200, 220, 50, 50),
                 LineStyle = LineStyle.Dash,
                 StrokeThickness = 1.8,
-                Text = $"t = {tCrit:F2}",
+                Text = $"  t = {tCrit:F2}",
                 TextColor = OxyColor.FromRgb(200, 50, 50),
                 FontSize = 9,
+                FontWeight = OxyPlot.FontWeights.Bold,
+                TextLinePosition = 0.5,
+                TextOrientation = AnnotationTextOrientation.Vertical,
                 TextHorizontalAlignment = HorizontalAlignment.Left,
-                TextVerticalAlignment = VerticalAlignment.Top,
-                TextMargin = 4
+                TextMargin = 3
             };
             model.Annotations.Add(critLine);
 
@@ -1367,7 +1356,22 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     OlsStatusText = $"精简模型: R²={OlsResult.ModelSummary.RSquared:F4}, R²adj={OlsResult.ModelSummary.RSquaredAdj:F4}, R²pred={OlsResult.ModelSummary.RSquaredPred:F4}";
                     UpdateEquationsDisplay(OlsResult);
 
+                    if (OlsResult.Coefficients != null)
+                    {
+                        foreach (var term in _paretoTerms.Where(t => t.IsIncluded))
+                        {
+                            var newCoeff = OlsResult.Coefficients
+                                .FirstOrDefault(c => c.Term == term.TermName);
+                            if (newCoeff != null)
+                            {
+                                term.AbsT = Math.Abs(newCoeff.TValue);
+                                term.PValue = newCoeff.PValue;
+                                term.IsSignificant = newCoeff.PValue < 0.05;
+                            }
+                        }
+                    }
                     RebuildParetoPlot();
+                    UpdateTermsText();
 
                     // 更新残差四合一
                     await LoadResidualDiagnosticsAsync();

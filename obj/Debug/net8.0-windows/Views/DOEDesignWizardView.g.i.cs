@@ -55,7 +55,7 @@ namespace MaxChemical.Modules.DOE.Views {
                 return;
             }
             _contentLoaded = true;
-            System.Uri resourceLocater = new System.Uri("/MaxChemical.Modules.DOE;V1.0.0.0;component/views/doedesignwizardview.xaml", System.UriKind.Relative);
+            System.Uri resourceLocater = new System.Uri("/MaxChemical.Modules.DOE;component/views/doedesignwizardview.xaml", System.UriKind.Relative);
             
             #line 1 "..\..\..\..\Views\DOEDesignWizardView.xaml"
             System.Windows.Application.LoadComponent(this, resourceLocater);

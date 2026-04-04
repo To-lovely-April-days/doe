@@ -62,7 +62,7 @@ namespace MaxChemical.Modules.DOE.Views {
                 return;
             }
             _contentLoaded = true;
-            System.Uri resourceLocater = new System.Uri("/MaxChemical.Modules.DOE;V1.0.0.0;component/views/doemodelanalysisview.xaml", System.UriKind.Relative);
+            System.Uri resourceLocater = new System.Uri("/MaxChemical.Modules.DOE;component/views/doemodelanalysisview.xaml", System.UriKind.Relative);
             
             #line 1 "..\..\..\..\Views\DOEModelAnalysisView.xaml"
             System.Windows.Application.LoadComponent(this, resourceLocater);

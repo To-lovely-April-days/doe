@@ -441,6 +441,11 @@ namespace MaxChemical.Modules.DOE.ViewModels
         }
         // 缓存当前的 Desirability 配置（从 LoadConfigAsync 加载）
         private List<DesirabilityResponseConfig> _currentDesirabilityConfigs = new();
+
+        // ── ★ v9: C# 端实时预测器 ──
+        private CSharpOlsPredictor? _csharpPredictor;
+        private double _profilerYMin, _profilerYMax;  // 锁定 Y 轴范围
+
         // ── Commands ──
         public DelegateCommand RefitReducedModelCommand { get; }
         public DelegateCommand RestoreFullModelCommand { get; }
@@ -1594,6 +1599,8 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
                 BuildProfilerPlots(data);
                 IsProfilerLoaded = true;
+                // ★ v9: 初始化 C# 端预测器（用于拖动时实时计算）
+                InitializeCSharpPredictor();
                 OlsStatusText = $"预测刻画器已生成 ({data.Factors.Count} 个因子) — 拖动红色竖线可交互调整";
             }
             catch (Exception ex)
@@ -1603,17 +1610,121 @@ namespace MaxChemical.Modules.DOE.ViewModels
             }
             finally { IsLoading = false; }
         }
+        /// <summary>
+        /// ★ v9: 从当前 OlsResult 初始化 C# 端预测器
+        /// </summary>
+        private void InitializeCSharpPredictor()
+        {
+            if (OlsResult?.Coefficients == null || OlsResult.CodingInfo == null)
+            {
+                _csharpPredictor = null;
+                return;
+            }
 
+            _csharpPredictor = new CSharpOlsPredictor();
+
+            var categoricalFactors = new List<string>();
+            var categoricalLevels = new Dictionary<string, List<string>>();
+            var factorRanges = new Dictionary<string, (double min, double max)>();
+            var allFactorNames = new List<string>();
+
+            foreach (var kv in OlsResult.CodingInfo)
+            {
+                allFactorNames.Add(kv.Key);
+                if (kv.Value.Type == "categorical")
+                {
+                    categoricalFactors.Add(kv.Key);
+                    if (_lastProfilerData?.Factors?.TryGetValue(kv.Key, out var fd) == true && fd.Levels != null)
+                        categoricalLevels[kv.Key] = fd.Levels;
+                }
+                else
+                {
+                    if (_lastProfilerData?.Factors?.TryGetValue(kv.Key, out var fd) == true && fd.Range?.Count == 2)
+                        factorRanges[kv.Key] = (fd.Range[0], fd.Range[1]);
+                }
+            }
+
+            _csharpPredictor.Initialize(
+                OlsResult.Coefficients, OlsResult.CodingInfo,
+                allFactorNames, categoricalFactors, categoricalLevels, factorRanges);
+
+            if (OlsResult.XtxInvFlat != null && OlsResult.XtxInvFlat.Length > 0 && OlsResult.Sigma > 0)
+            {
+                _csharpPredictor.SetCIParameters(
+                    OlsResult.XtxInvFlat, OlsResult.Sigma, OlsResult.TCrit, OlsResult.ParamCount);
+            }
+
+            // 锁定 Y 轴范围
+            if (_lastProfilerData?.Factors != null)
+            {
+                _profilerYMin = double.MaxValue;
+                _profilerYMax = double.MinValue;
+                foreach (var kv in _lastProfilerData.Factors)
+                {
+                    if (kv.Value.Y.Count > 0)
+                    {
+                        _profilerYMin = Math.Min(_profilerYMin, kv.Value.Y.Min());
+                        _profilerYMax = Math.Max(_profilerYMax, kv.Value.Y.Max());
+                    }
+                    if (kv.Value.YLower?.Count > 0)
+                        _profilerYMin = Math.Min(_profilerYMin, kv.Value.YLower.Min());
+                    if (kv.Value.YUpper?.Count > 0)
+                        _profilerYMax = Math.Max(_profilerYMax, kv.Value.YUpper.Max());
+                }
+                double yPad = (_profilerYMax - _profilerYMin) * 0.15;
+                _profilerYMin -= yPad;
+                _profilerYMax += yPad;
+            }
+            // ★ 调试: 验证 C# 预测器和 Python 的预测值是否一致
+            if (_csharpPredictor.IsReady && _lastProfilerData != null)
+            {
+                double pyPredicted = _lastProfilerData.CurrentPredicted;
+                double csPredicted = _csharpPredictor.Predict(_profilerCurrentValues);
+                _logger.LogInformation(
+                    "预测器验证: Python={PyPred:F6}, C#={CsPred:F6}, 差异={Diff:F6}",
+                    pyPredicted, csPredicted, Math.Abs(pyPredicted - csPredicted));
+            }
+            // ★ 调试: 打印系数表
+            if (_csharpPredictor.IsReady)
+            {
+                _logger.LogInformation("=== 系数表 ===");
+                foreach (var c in OlsResult.Coefficients)
+                    _logger.LogInformation("  [{Term}] = {Coeff:F6}", c.Term, c.Coefficient);
+
+                _logger.LogInformation("=== 当前因子值 ===");
+                foreach (var kv in _profilerCurrentValues)
+                    _logger.LogInformation("  {Key} = {Value}", kv.Key, kv.Value);
+
+                _logger.LogInformation("=== CodingInfo ===");
+                foreach (var kv in OlsResult.CodingInfo)
+                    _logger.LogInformation("  {Key}: type={Type}, center={Center}, half_range={HR}",
+                        kv.Key, kv.Value.Type, kv.Value.Center, kv.Value.HalfRange);
+            }
+            if (_csharpPredictor.IsReady)
+                _logger.LogInformation("C# 预测器已初始化（含CI），拖动将使用本地计算");
+        }
         /// <summary>
         /// ★ v6: 从 code-behind 调用 — 用户拖动红色竖线后更新所有图
         /// ★ 关键: 原地更新每个 PlotModel 的曲线数据，不替换列表（避免 UI 闪烁）
         /// </summary>
+        /// <summary>
+        /// ★ v9: 更新因子值 — 完全用 C# 预测器，不调 Python
+        /// </summary>
         public async Task UpdateProfilerValueAsync(string factorName, object newValue)
         {
             if (!IsProfilerLoaded) return;
-            if (!IsDirectImportMode && SelectedOlsBatch == null) return;
 
             _profilerCurrentValues[factorName] = newValue;
+
+            // ★ C# 预测器路径（实时，~1ms）
+            if (_csharpPredictor?.IsReady == true)
+            {
+                UpdateProfilerLocal(factorName, newValue);
+                return;
+            }
+
+            // ★ 回退: 没有 C# 预测器时才走 Python（首次加载前）
+            if (!IsDirectImportMode && SelectedOlsBatch == null) return;
 
             try
             {
@@ -1641,8 +1752,9 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     _profilerCurrentValues[kv.Key] = kv.Value.CurrentValue ?? _profilerCurrentValues[kv.Key];
 
                 UpdateProfilerPlotsInPlace(data, factorName);
-                ProfilerCurrentPredicted = $"{data.ResponseName}    {data.CurrentPredicted:F4}";
-                // ★ Feature 2: 同步更新意愿行
+                string ciText = GetCurrentCIText(data);
+                ProfilerCurrentPredicted = $"{data.ResponseName}    {data.CurrentPredicted:F4}{ciText}";
+
                 if (IsDesirabilityVisible)
                     RefreshDesirabilityPlotsInPlace();
             }
@@ -1650,6 +1762,102 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 _logger.LogError(ex, "更新预测刻画器失败");
             }
+        }
+
+        /// <summary>
+        /// ★ v9: 拖动过程中用 C# 预测器实时更新所有图（完全不调 Python）
+        /// </summary>
+        public void UpdateProfilerLocal(string draggedFactor, object newValue)
+        {
+            if (_csharpPredictor == null || !_csharpPredictor.IsReady) return;
+            if (_lastProfilerData?.Factors == null) return;
+
+            _profilerCurrentValues[draggedFactor] = newValue;
+
+            // 计算当前预测值 + CI
+            var (currentPredicted, ciLo, ciHi) = _csharpPredictor.PredictWithCI(_profilerCurrentValues);
+
+            // 重算所有因子的曲线 + CI
+            var sweepResults = _csharpPredictor.SweepAllFactors(_profilerCurrentValues, 50);
+
+            // 更新缓存数据
+            foreach (var kv in sweepResults)
+            {
+                if (!_lastProfilerData.Factors.TryGetValue(kv.Key, out var fd)) continue;
+                fd.CurrentValue = _profilerCurrentValues.GetValueOrDefault(kv.Key);
+                fd.Y.Clear(); fd.Y.AddRange(kv.Value.Y);
+                fd.YLower.Clear(); fd.YLower.AddRange(kv.Value.YLower);
+                fd.YUpper.Clear(); fd.YUpper.AddRange(kv.Value.YUpper);
+            }
+            _lastProfilerData.CurrentPredicted = currentPredicted;
+
+            // 用锁定的 Y 轴范围重建所有图（不跳动）
+            if (ProfilerPlots != null)
+            {
+                for (int i = 0; i < _profilerFactorOrder.Count && i < ProfilerPlots.Count; i++)
+                {
+                    var fname = _profilerFactorOrder[i];
+                    if (!_lastProfilerData.Factors.TryGetValue(fname, out var fdata)) continue;
+                    var pm = ProfilerPlots[i];
+                    RebuildSinglePlot(pm, fname, fdata, currentPredicted,
+                        _profilerYMin, _profilerYMax,
+                        i == 0 ? _lastProfilerData.ResponseName : "");
+                }
+            }
+
+            // 更新预测值文本（含 CI）
+            string ciText = $"  95%CI [{ciLo:F4}, {ciHi:F4}]";
+            ProfilerCurrentPredicted = $"{_lastProfilerData.ResponseName}    {currentPredicted:F4}{ciText}";
+
+            // 刷新意愿行
+            if (IsDesirabilityVisible)
+                RefreshDesirabilityPlotsInPlace();
+        }
+        /// <summary>
+        /// ★ 新增: 根据当前预测刻画器数据，计算当前位置的置信区间文本
+        /// </summary>
+        private string GetCurrentCIText(ProfilerResult data)
+        {
+            if (data?.Factors == null) return "";
+            foreach (var kv in data.Factors)
+            {
+                var fd = kv.Value;
+                if (fd.YLower == null || fd.YUpper == null || fd.YLower.Count == 0) continue;
+
+                double? lo = null, hi = null;
+                if (fd.IsCategorical)
+                {
+                    var curVal = _profilerCurrentValues.TryGetValue(kv.Key, out var cv) ? cv?.ToString() : "";
+                    int idx = fd.X_Labels.IndexOf(curVal ?? "");
+                    if (idx >= 0 && idx < fd.YLower.Count)
+                    { lo = fd.YLower[idx]; hi = fd.YUpper[idx]; }
+                }
+                else
+                {
+                    double curX = fd.CurrentNumericValue;
+                    var xs = fd.X;
+                    if (xs.Count < 2) continue;
+                    if (curX <= xs[0]) { lo = fd.YLower[0]; hi = fd.YUpper[0]; }
+                    else if (curX >= xs[xs.Count - 1]) { lo = fd.YLower[^1]; hi = fd.YUpper[^1]; }
+                    else
+                    {
+                        for (int k = 0; k < xs.Count - 1; k++)
+                        {
+                            if (curX >= xs[k] && curX <= xs[k + 1])
+                            {
+                                double t = (curX - xs[k]) / (xs[k + 1] - xs[k]);
+                                lo = fd.YLower[k] + t * (fd.YLower[k + 1] - fd.YLower[k]);
+                                hi = fd.YUpper[k] + t * (fd.YUpper[k + 1] - fd.YUpper[k]);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (lo.HasValue && hi.HasValue)
+                    return $"  95%CI [{lo.Value:F4}, {hi.Value:F4}]";
+                break;
+            }
+            return "";
         }
         /// <summary>
         /// ★ Feature 3: 获取当前响应的 Desirability 配置（供控制点拖拽用）
@@ -1727,7 +1935,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
             }
             dPlot.Series.Add(curveSeries);
 
-            // 三个控制点
+            // ★ v8: 控制点根据目标类型正确放置
             var controlPoints = new ScatterSeries
             {
                 MarkerType = MarkerType.Square,
@@ -1736,10 +1944,26 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 MarkerStroke = OxyColors.Black,
                 MarkerStrokeThickness = 1.5
             };
-            controlPoints.Points.Add(new ScatterPoint(cfg.Lower, 0));
-            double midY = (cfg.Lower + cfg.Target) / 2.0;
-            controlPoints.Points.Add(new ScatterPoint(midY, 0.5));
-            controlPoints.Points.Add(new ScatterPoint(cfg.Target, 1.0));
+
+            switch (cfg.Goal)
+            {
+                case DesirabilityGoal.Maximize:
+                    controlPoints.Points.Add(new ScatterPoint(cfg.Lower, 0));
+                    controlPoints.Points.Add(new ScatterPoint(cfg.Target, 1));
+                    break;
+
+                case DesirabilityGoal.Minimize:
+                    controlPoints.Points.Add(new ScatterPoint(cfg.Target, 1));
+                    controlPoints.Points.Add(new ScatterPoint(cfg.Upper, 0));
+                    break;
+
+                default: // 望目
+                    controlPoints.Points.Add(new ScatterPoint(cfg.Lower, 0));
+                    controlPoints.Points.Add(new ScatterPoint(cfg.Target, 1));
+                    controlPoints.Points.Add(new ScatterPoint(cfg.Upper, 0));
+                    break;
+            }
+
             dPlot.Series.Add(controlPoints);
 
             // 当前 D 值
@@ -1809,7 +2033,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
         /// </summary>
         private void UpdateCrosshairOnly(PlotModel pm, ProfilerFactorData fdata, double currentPredicted)
         {
-            // 更新红色竖线
+            // 更新红色竖线（不再显示 Text）
             var vline = pm.Annotations
                 .OfType<OxyPlot.Annotations.LineAnnotation>()
                 .FirstOrDefault(a => a.Type == OxyPlot.Annotations.LineAnnotationType.Vertical && a.Color == OxyColors.Red);
@@ -1817,8 +2041,10 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 double curX = fdata.CurrentNumericValue;
                 vline.X = curX;
-                vline.Text = $"{curX:F1}";
             }
+
+            // ★ 更新 Subtitle 显示当前值
+            pm.Subtitle = $"{fdata.CurrentNumericValue:F2}";
 
             // 更新红色横线
             var hline = pm.Annotations
@@ -1835,7 +2061,18 @@ namespace MaxChemical.Modules.DOE.ViewModels
         /// </summary>
         private void RebuildSinglePlot(PlotModel pm, string fname, ProfilerFactorData fdata,
        double currentPredicted, double yMin, double yMax, string yTitle)
-        {
+        {// ★ 更新 Subtitle 显示当前值
+            if (fdata.IsCategorical)
+            {
+                var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "";
+                pm.Subtitle = curVal ?? "";
+            }
+            else
+            {
+                pm.Subtitle = $"{fdata.CurrentNumericValue:F2}";
+            }
+            pm.SubtitleColor = OxyColors.Red;
+            pm.SubtitleFontSize = 10;
             pm.Series.Clear();
             pm.Annotations.Clear();
             pm.Axes.Clear();
@@ -1955,10 +2192,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     X = curX,
                     Color = OxyColors.Red,
                     LineStyle = LineStyle.Dash,
-                    StrokeThickness = 1.5,
-                    Text = $"{curX:F1}",
-                    TextColor = OxyColors.Red,
-                    FontSize = 9
+                    StrokeThickness = 1.5
                 });
             }
 
@@ -2058,7 +2292,47 @@ namespace MaxChemical.Modules.DOE.ViewModels
             }
             return null;
         }
+        /// <summary>
+        /// ★ 新增: 在缓存的 CI 曲线上插值，给定 X 返回 (yLower, yUpper)
+        /// </summary>
+        public (double? lower, double? upper) GetProfilerCIAtX(string factorName, double xValue)
+        {
+            if (_lastProfilerData?.Factors == null) return (null, null);
+            if (!_lastProfilerData.Factors.TryGetValue(factorName, out var fd)) return (null, null);
+            if (fd.IsCategorical || fd.X.Count < 2) return (null, null);
+            if (fd.YLower == null || fd.YUpper == null || fd.YLower.Count != fd.Y.Count) return (null, null);
 
+            var xs = fd.X;
+            var lows = fd.YLower;
+            var ups = fd.YUpper;
+
+            if (xValue <= xs[0]) return (lows[0], ups[0]);
+            if (xValue >= xs[xs.Count - 1]) return (lows[lows.Count - 1], ups[ups.Count - 1]);
+
+            for (int i = 0; i < xs.Count - 1; i++)
+            {
+                if (xValue >= xs[i] && xValue <= xs[i + 1])
+                {
+                    double t = (xValue - xs[i]) / (xs[i + 1] - xs[i]);
+                    double lo = lows[i] + t * (lows[i + 1] - lows[i]);
+                    double hi = ups[i] + t * (ups[i + 1] - ups[i]);
+                    return (lo, hi);
+                }
+            }
+            return (null, null);
+        }
+
+        /// <summary>
+        /// ★ 新增: 获取类别因子在指定水平索引处的 CI 值
+        /// </summary>
+        public (double? lower, double? upper) GetProfilerCategoryCIAtIndex(string factorName, int index)
+        {
+            if (_lastProfilerData?.Factors == null) return (null, null);
+            if (!_lastProfilerData.Factors.TryGetValue(factorName, out var fd)) return (null, null);
+            if (!fd.IsCategorical || index < 0 || index >= fd.Y.Count) return (null, null);
+            if (fd.YLower == null || fd.YUpper == null || fd.YLower.Count != fd.Y.Count) return (null, null);
+            return (fd.YLower[index], fd.YUpper[index]);
+        }
         /// <summary>
         /// 获取全局 Y 范围（所有图共享）
         /// </summary>
@@ -2085,7 +2359,55 @@ namespace MaxChemical.Modules.DOE.ViewModels
         /// </summary>
         private void BuildProfilerPlots(ProfilerResult data)
         {
-            ProfilerCurrentPredicted = $"{data.ResponseName}    {data.CurrentPredicted:F4}";
+            // ★ 计算当前点的置信区间并显示
+            string ciText = "";
+            // 用第一个因子的当前值来获取当前位置的 CI
+            foreach (var kv in data.Factors)
+            {
+                var fd = kv.Value;
+                if (fd.YLower != null && fd.YUpper != null && fd.YLower.Count > 0)
+                {
+                    double? lo = null, hi = null;
+                    if (fd.IsCategorical)
+                    {
+                        var curVal = _profilerCurrentValues.TryGetValue(kv.Key, out var cv) ? cv?.ToString() : "";
+                        var labels = fd.X_Labels;
+                        int idx = labels.IndexOf(curVal ?? "");
+                        if (idx >= 0 && idx < fd.YLower.Count)
+                        {
+                            lo = fd.YLower[idx];
+                            hi = fd.YUpper[idx];
+                        }
+                    }
+                    else
+                    {
+                        double curX = fd.CurrentNumericValue;
+                        // 在 CI 曲线上插值
+                        var xs = fd.X;
+                        if (curX <= xs[0]) { lo = fd.YLower[0]; hi = fd.YUpper[0]; }
+                        else if (curX >= xs[xs.Count - 1]) { lo = fd.YLower[fd.YLower.Count - 1]; hi = fd.YUpper[fd.YUpper.Count - 1]; }
+                        else
+                        {
+                            for (int k = 0; k < xs.Count - 1; k++)
+                            {
+                                if (curX >= xs[k] && curX <= xs[k + 1])
+                                {
+                                    double t = (curX - xs[k]) / (xs[k + 1] - xs[k]);
+                                    lo = fd.YLower[k] + t * (fd.YLower[k + 1] - fd.YLower[k]);
+                                    hi = fd.YUpper[k] + t * (fd.YUpper[k + 1] - fd.YUpper[k]);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (lo.HasValue && hi.HasValue)
+                    {
+                        ciText = $"  95%CI [{lo.Value:F4}, {hi.Value:F4}]";
+                    }
+                    break;  // 只需要第一个因子的 CI 来代表当前预测位置
+                }
+            }
+            ProfilerCurrentPredicted = $"{data.ResponseName}    {data.CurrentPredicted:F4}{ciText}";
 
             double yMin = double.MaxValue, yMax = double.MinValue;
             foreach (var kv in data.Factors)
@@ -2104,11 +2426,26 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 if (!data.Factors.TryGetValue(fname, out var fdata)) continue;
 
+                // ★ 计算当前因子值的显示文本
+                string subtitleText = "";
+                if (fdata.IsCategorical)
+                {
+                    var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "";
+                    subtitleText = curVal ?? "";
+                }
+                else
+                {
+                    subtitleText = $"{fdata.CurrentNumericValue:F2}";
+                }
+
                 var pm = new PlotModel
                 {
                     Title = fname,
                     TitleFontSize = 11,
-                    PlotMargins = new OxyThickness(50, 10, 10, 35)
+                    Subtitle = subtitleText,
+                    SubtitleFontSize = 10,
+                    SubtitleColor = OxyColors.Red,
+                    PlotMargins = new OxyThickness(50, 20, 10, 35)  // 顶部留更多空间给 Subtitle
                 };
 
                 pm.Axes.Add(new LinearAxis
@@ -2234,10 +2571,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                         X = curX,
                         Color = OxyColors.Red,
                         LineStyle = LineStyle.Dash,
-                        StrokeThickness = 1.5,
-                        Text = $"{curX:F1}",
-                        TextColor = OxyColors.Red,
-                        FontSize = 9
+                        StrokeThickness = 1.5
                     });
 
                     pm.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
@@ -3640,14 +3974,28 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 if (!_lastProfilerData.Factors.TryGetValue(fname, out var fdata)) continue;
 
+                // ★ 计算当前因子值的显示文本
+                string dSubtitle = "";
+                if (fdata.IsCategorical)
+                {
+                    var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "";
+                    dSubtitle = curVal ?? "";
+                }
+                else
+                {
+                    dSubtitle = $"{fdata.CurrentNumericValue:F2}";
+                }
+
                 var pm = new PlotModel
                 {
-                    // ★ Feature 1: 底部因子名称
                     Title = fname,
                     TitleFontSize = 10,
-                    TitleColor = OxyColor.FromRgb(200, 0, 0),  // 红色，跟 JMP 一致
+                    TitleColor = OxyColor.FromRgb(200, 0, 0),
                     TitleHorizontalAlignment = TitleHorizontalAlignment.CenteredWithinView,
-                    PlotMargins = new OxyThickness(50, 5, 10, 30)
+                    Subtitle = dSubtitle,
+                    SubtitleFontSize = 9,
+                    SubtitleColor = OxyColors.Red,
+                    PlotMargins = new OxyThickness(50, 12, 10, 30)
                 };
 
                 pm.Axes.Add(new LinearAxis
@@ -3658,7 +4006,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     Maximum = 1.05,
                     MajorStep = 0.5,
                     // ★ Feature 1: 只在第一个图显示 "意愿 0.xxxx" 标签
-                    Title = plots.Count == 0 ? $"意愿{currentCompositeD:F4}" : ""
+                    Title = plots.Count == 0 ? $"意愿\n{currentCompositeD:F4}" : ""
                 });
 
                 if (fdata.IsCategorical)
@@ -3741,14 +4089,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                         X = curX,
                         Color = OxyColors.Red,
                         LineStyle = LineStyle.Dash,
-                        StrokeThickness = 1.5,
-                        Text = $"{curX:F0}",
-                        TextColor = OxyColors.Red,
-                        FontSize = 9,
-                        FontWeight = OxyPlot.FontWeights.Bold,
-                        TextLinePosition = 0.5,
-                        TextOrientation = OxyPlot.Annotations.AnnotationTextOrientation.Horizontal,
-                        TextHorizontalAlignment = OxyPlot.HorizontalAlignment.Left
+                        StrokeThickness = 1.5
                     });
                 }
 
@@ -3771,6 +4112,51 @@ namespace MaxChemical.Modules.DOE.ViewModels
             DesirabilityPlots = plots;
         }
         /// <summary>
+        /// ★ 新增: 公开的 Desirability 计算方法（供 code-behind 拖动时调用）
+        /// </summary>
+        public double ComputeDesirabilityPublic(double y)
+        {
+            return ComputeDesirabilityForCurrentResponse(y);
+        }
+        /// <summary>
+        /// ★ 新增: 从意愿行拖动同步更新响应行的红线和 Subtitle（不触发后端调用）
+        /// </summary>
+        public void UpdateProfilerCrosshairFromDesirability(string factorName, double newX)
+        {
+            if (ProfilerPlots == null || _profilerFactorOrder == null) return;
+
+            int idx = _profilerFactorOrder.IndexOf(factorName);
+            if (idx < 0 || idx >= ProfilerPlots.Count) return;
+
+            var pm = ProfilerPlots[idx];
+
+            // 更新红色竖线位置
+            var vline = pm.Annotations
+                .OfType<OxyPlot.Annotations.LineAnnotation>()
+                .FirstOrDefault(a => a.Type == OxyPlot.Annotations.LineAnnotationType.Vertical
+                                     && a.Color == OxyColors.Red);
+            if (vline != null)
+                vline.X = newX;
+
+            // 更新 Subtitle
+            pm.Subtitle = $"{newX:F2}";
+            pm.SubtitleColor = OxyColors.Red;
+            pm.SubtitleFontSize = 10;
+
+            // 更新水平横线（预测值）
+            double? responseY = GetProfilerYAtX(factorName, newX);
+            if (responseY.HasValue)
+            {
+                var hline = pm.Annotations
+                    .OfType<OxyPlot.Annotations.LineAnnotation>()
+                    .FirstOrDefault(a => a.Type == OxyPlot.Annotations.LineAnnotationType.Horizontal);
+                if (hline != null)
+                    hline.Y = responseY.Value;
+            }
+
+            pm.InvalidatePlot(false);
+        }
+        /// <summary>
         /// ★ Feature 2: 获取意愿行中的因子名称（排除最后的"意愿"图）
         /// </summary>
         public string? GetDesirabilityFactorName(int plotIndex)
@@ -3784,6 +4170,12 @@ namespace MaxChemical.Modules.DOE.ViewModels
         /// </summary>
         public void RefreshDesirabilityPlotsInPlace()
         {
+            _logger.LogInformation("意愿刷新: predicted={Pred:F4}, cfg.Lower={Lo}, cfg.Upper={Hi}, cfg.Target={T}, cfg.Goal={G}",
+    _lastProfilerData.CurrentPredicted,
+    _currentDesirabilityConfigs.FirstOrDefault()?.Lower,
+    _currentDesirabilityConfigs.FirstOrDefault()?.Upper,
+    _currentDesirabilityConfigs.FirstOrDefault()?.Target,
+    _currentDesirabilityConfigs.FirstOrDefault()?.Goal);
             if (_lastProfilerData?.Factors == null) return;
             if (DesirabilityPlots == null || DesirabilityPlots.Count == 0) return;
 
@@ -3797,6 +4189,16 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 if (!_lastProfilerData.Factors.TryGetValue(fname, out var fdata)) continue;
 
                 var pm = DesirabilityPlots[i];
+                // ★ 更新意愿行 Subtitle
+                if (fdata.IsCategorical)
+                {
+                    var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "";
+                    pm.Subtitle = curVal ?? "";
+                }
+                else
+                {
+                    pm.Subtitle = $"{fdata.CurrentNumericValue:F2}";
+                }
                 pm.Series.Clear();
                 pm.Annotations.Clear();
 
@@ -3823,13 +4225,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                             Color = OxyColors.Red,
                             LineStyle = LineStyle.Dash,
                             StrokeThickness = 1.5,
-                            Text = curVal ?? "",
-                            TextColor = OxyColors.Red,
-                            FontSize = 9,
-                            FontWeight = OxyPlot.FontWeights.Bold,
-                            TextLinePosition = 0.5,
-                            TextOrientation = OxyPlot.Annotations.AnnotationTextOrientation.Horizontal,
-                            TextHorizontalAlignment = OxyPlot.HorizontalAlignment.Left
+                           
                         });
                     }
                 }
@@ -3934,7 +4330,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 }
                 dPlot.Series.Add(curveSeries);
 
-                // ★ Feature 3: 三个控制点（方块标记）
+                // ★ v8: 控制点根据目标类型正确放置
                 var controlPoints = new ScatterSeries
                 {
                     MarkerType = MarkerType.Square,
@@ -3944,14 +4340,27 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     MarkerStrokeThickness = 1.5
                 };
 
-                // Lower 点 (y=Lower, d=0)
-                controlPoints.Points.Add(new ScatterPoint(cfg.Lower, 0));
-                // Mid 点 (y=中间值, d=0.5)
-                double midY = (cfg.Lower + cfg.Target) / 2.0;
-                controlPoints.Points.Add(new ScatterPoint(midY, 0.5));
-                // Target 点 (y=Target, d=1)
-                controlPoints.Points.Add(new ScatterPoint(cfg.Target,
-                    cfg.Goal == DesirabilityGoal.Maximize ? 1.0 : 0.0));
+                switch (cfg.Goal)
+                {
+                    case DesirabilityGoal.Maximize:
+                        // Lower(d=0) → Target(d=1)
+                        controlPoints.Points.Add(new ScatterPoint(cfg.Lower, 0));
+                        controlPoints.Points.Add(new ScatterPoint(cfg.Target, 1));
+                        break;
+
+                    case DesirabilityGoal.Minimize:
+                        // Target(d=1) → Upper(d=0)
+                        controlPoints.Points.Add(new ScatterPoint(cfg.Target, 1));
+                        controlPoints.Points.Add(new ScatterPoint(cfg.Upper, 0));
+                        break;
+
+                    default: // 望目
+                             // Lower(d=0) → Target(d=1) → Upper(d=0)
+                        controlPoints.Points.Add(new ScatterPoint(cfg.Lower, 0));
+                        controlPoints.Points.Add(new ScatterPoint(cfg.Target, 1));
+                        controlPoints.Points.Add(new ScatterPoint(cfg.Upper, 0));
+                        break;
+                }
 
                 dPlot.Series.Add(controlPoints);
 
@@ -4210,9 +4619,42 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
             // 弹窗
             bool confirmed = false;
+            // ★ v8: 收集每个响应变量的数据范围，传给弹窗用于智能默认值
+            var dataRanges = new Dictionary<string, (double min, double max)>();
+            if (_lastProfilerData?.Factors != null)
+            {
+                // 从 profiler 数据中获取响应值范围
+                foreach (var kv in _lastProfilerData.Factors)
+                {
+                    if (kv.Value.Y.Count > 0)
+                    {
+                        double yMin = kv.Value.Y.Min();
+                        double yMax = kv.Value.Y.Max();
+                        if (!dataRanges.ContainsKey(_selectedResponseName))
+                            dataRanges[_selectedResponseName] = (yMin, yMax);
+                        else
+                        {
+                            var existing = dataRanges[_selectedResponseName];
+                            dataRanges[_selectedResponseName] = (
+                                Math.Min(existing.min, yMin),
+                                Math.Max(existing.max, yMax));
+                        }
+                    }
+                }
+            }
+            // 如果 profiler 没数据，尝试从直接导入数据获取
+            if (dataRanges.Count == 0 && IsDirectImportMode)
+            {
+                foreach (var kv in _directImportResponsesData)
+                {
+                    if (kv.Value.Count > 0)
+                        dataRanges[kv.Key] = (kv.Value.Min(), kv.Value.Max());
+                }
+            }
+
             System.Windows.Application.Current.Dispatcher.Invoke(() =>
             {
-                var dialog = new Views.DesirabilityConfigDialog(dialogConfigs, _desirabilityService);
+                var dialog = new Views.DesirabilityConfigDialog(dialogConfigs, _desirabilityService, dataRanges);
                 dialog.Owner = System.Windows.Application.Current.MainWindow;
                 dialog.ShowDialog();
                 confirmed = dialog.Confirmed;

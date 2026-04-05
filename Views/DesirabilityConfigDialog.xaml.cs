@@ -9,22 +9,10 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Shapes;
 
 namespace MaxChemical.Modules.DOE.Views
 {
-    /// <summary>
-    /// DesirabilityConfigDialog.xaml 的交互逻辑
-    /// </summary>
     public partial class DesirabilityConfigDialog : Window
     {
         public bool Confirmed { get; private set; }
@@ -33,24 +21,44 @@ namespace MaxChemical.Modules.DOE.Views
         private readonly IDesirabilityService _desirabilityService;
         private ObservableCollection<DesirabilityConfigItem> _configs;
 
-        public DesirabilityConfigDialog(List<DesirabilityResponseConfig> configs,
-                                         IDesirabilityService service)
+        public DesirabilityConfigDialog(
+            List<DesirabilityResponseConfig> configs,
+            IDesirabilityService service,
+            Dictionary<string, (double min, double max)>? dataRanges = null)
         {
             InitializeComponent();
             _desirabilityService = service;
 
             _configs = new ObservableCollection<DesirabilityConfigItem>(
-                configs.Select(c => new DesirabilityConfigItem(c)));
+                configs.Select(c =>
+                {
+                    var item = new DesirabilityConfigItem(c);
+                    if (dataRanges != null && dataRanges.TryGetValue(c.ResponseName, out var range))
+                    {
+                        item.DataMin = range.min;
+                        item.DataMax = range.max;
+                    }
+                    if (item.IsDefaultValues && !double.IsNaN(item.DataMin))
+                        item.AutoFillFromDataRange();
+                    return item;
+                }));
 
             DataContext = new { Configs = _configs };
-
-            // 为每个配置生成预览曲线
-            foreach (var cfg in _configs)
-                cfg.UpdatePreview();
+            foreach (var cfg in _configs) cfg.UpdatePreview();
         }
 
         private void OK_Click(object sender, RoutedEventArgs e)
         {
+            foreach (var cfg in _configs)
+            {
+                var err = cfg.Validate();
+                if (err != null)
+                {
+                    MessageBox.Show($"响应 '{cfg.ResponseName}': {err}", "校验失败",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+            }
             Confirmed = true;
             ResultConfigs = _configs.Select(c => c.ToConfig()).ToList();
             Close();
@@ -61,44 +69,118 @@ namespace MaxChemical.Modules.DOE.Views
             Confirmed = false;
             Close();
         }
+
+        private void ResetDefaults_Click(object sender, RoutedEventArgs e)
+        {
+            foreach (var cfg in _configs)
+            {
+                cfg.AutoFillFromDataRange();
+                cfg.UpdatePreview();
+            }
+        }
     }
 
     /// <summary>
-    /// 弹窗中每个响应的配置项（含实时预览）
+    /// 意愿配置项 — 用户直觉的属性命名
+    /// 最大化: 用户填 TargetValue(目标) + LowerBound(最低可接受)
+    /// 最小化: 用户填 TargetValue(目标) + UpperBound(最高可接受)
+    /// 望目:   用户填 LowerBound(下限) + TargetValue(目标) + UpperBound(上限)
     /// </summary>
     public class DesirabilityConfigItem : BindableBase
     {
         public string ResponseName { get; set; } = "";
+        public double DataMin { get; set; } = double.NaN;
+        public double DataMax { get; set; } = double.NaN;
 
-        private string _goal = "maximize";
-        private double _lower, _upper, _target;
+        private string _goal = "最大化";
+        private double _targetValue;   // 目标值 (d=1 的位置)
+        private double _lowerBound;    // 下界 (最大化: d=0; 望目: d=0)
+        private double _upperBound;    // 上界 (最小化: d=0; 望目: d=0)
         private int _importance = 3;
-        private double _shape = 1.0, _shapeLower = 1.0, _shapeUpper = 1.0;
+        private double _shape = 1.0;
         private PlotModel? _previewPlot;
 
-        public string Goal { get => _goal; set { if (SetProperty(ref _goal, value)) UpdatePreview(); } }
-        public double Lower { get => _lower; set { if (SetProperty(ref _lower, value)) UpdatePreview(); } }
-        public double Upper { get => _upper; set { if (SetProperty(ref _upper, value)) UpdatePreview(); } }
-        public double Target { get => _target; set { if (SetProperty(ref _target, value)) UpdatePreview(); } }
-        public int Importance { get => _importance; set { if (SetProperty(ref _importance, value)) UpdatePreview(); } }
-        public double Shape { get => _shape; set { if (SetProperty(ref _shape, value)) UpdatePreview(); } }
-        public double ShapeLower { get => _shapeLower; set => SetProperty(ref _shapeLower, value); }
-        public double ShapeUpper { get => _shapeUpper; set => SetProperty(ref _shapeUpper, value); }
-        public PlotModel? PreviewPlot { get => _previewPlot; set => SetProperty(ref _previewPlot, value); }
-        // 选项列表
+        // ── 绑定属性 ──
+
+        public string Goal
+        {
+            get => _goal;
+            set
+            {
+                if (SetProperty(ref _goal, value))
+                {
+                    RaisePropertyChanged(nameof(IsMaximize));
+                    RaisePropertyChanged(nameof(IsMinimize));
+                    RaisePropertyChanged(nameof(IsTarget));
+                    UpdatePreview();
+                }
+            }
+        }
+
+        public double TargetValue
+        {
+            get => _targetValue;
+            set { if (SetProperty(ref _targetValue, value)) UpdatePreview(); }
+        }
+
+        public double LowerBound
+        {
+            get => _lowerBound;
+            set { if (SetProperty(ref _lowerBound, value)) UpdatePreview(); }
+        }
+
+        public double UpperBound
+        {
+            get => _upperBound;
+            set { if (SetProperty(ref _upperBound, value)) UpdatePreview(); }
+        }
+
+        public int Importance
+        {
+            get => _importance;
+            set => SetProperty(ref _importance, value);
+        }
+
+        public double Shape
+        {
+            get => _shape;
+            set { if (SetProperty(ref _shape, value)) UpdatePreview(); }
+        }
+
+        public PlotModel? PreviewPlot
+        {
+            get => _previewPlot;
+            set => SetProperty(ref _previewPlot, value);
+        }
+
+        // ── 可见性 ──
+
+        public bool IsMaximize => Goal == "最大化";
+        public bool IsMinimize => Goal == "最小化";
+        public bool IsTarget => Goal == "望目";
+
+        // ── 显示文本 ──
+
+        public string DataRangeText =>
+            !double.IsNaN(DataMin) ? $"数据范围: [{DataMin:F2}, {DataMax:F2}]" : "";
+
+        public string ShapeHint =>
+            _shape < 0.95 ? "凸形（容易满足）" :
+            _shape > 1.05 ? "凹形（严格要求）" : "线性";
+
+        public bool IsDefaultValues =>
+            Math.Abs(_lowerBound) < 1e-6 && Math.Abs(_upperBound - 100) < 1e-6;
+
         public static List<string> GoalOptions => new() { "最大化", "最小化", "望目" };
+
+        // ── 构造 ──
+
         public DesirabilityConfigItem(DesirabilityResponseConfig cfg)
         {
             ResponseName = cfg.ResponseName;
-            _goal = cfg.Goal.ToString().ToLower();
-            _lower = cfg.Lower;
-            _upper = cfg.Upper;
-            _target = cfg.Target;
             _importance = cfg.Importance;
             _shape = cfg.Shape;
-            _shapeLower = cfg.ShapeLower;
-            _shapeUpper = cfg.ShapeUpper;
-            ResponseName = cfg.ResponseName;
+
             _goal = cfg.Goal switch
             {
                 DesirabilityGoal.Maximize => "最大化",
@@ -106,17 +188,91 @@ namespace MaxChemical.Modules.DOE.Views
                 DesirabilityGoal.Target => "望目",
                 _ => "最大化"
             };
+
+            _lowerBound = cfg.Lower;
+            _upperBound = cfg.Upper;
+            _targetValue = cfg.Target;
         }
 
-        /// <summary>
-        /// 实时预览 d(y) 曲线 — 纯 C# 端计算（不走 Python，避免延迟）
-        /// </summary>
+        // ── 智能默认值 ──
+
+        public void AutoFillFromDataRange()
+        {
+            if (double.IsNaN(DataMin) || double.IsNaN(DataMax) || DataMax <= DataMin)
+            {
+                _lowerBound = 0; _upperBound = 100; _targetValue = 50;
+                _shape = 1.0;
+                NotifyAll();
+                return;
+            }
+
+            double range = DataMax - DataMin;
+            double margin = range * 0.05;
+
+            if (Goal == "最大化")
+            {
+                _lowerBound = Math.Round(DataMin - margin, 4);
+                _targetValue = Math.Round(DataMax + margin, 4);
+                _upperBound = _targetValue;
+            }
+            else if (Goal == "最小化")
+            {
+                _targetValue = Math.Round(DataMin - margin, 4);
+                _upperBound = Math.Round(DataMax + margin, 4);
+                _lowerBound = _targetValue;
+            }
+            else
+            {
+                _lowerBound = Math.Round(DataMin - margin, 4);
+                _upperBound = Math.Round(DataMax + margin, 4);
+                _targetValue = Math.Round((DataMin + DataMax) / 2.0, 4);
+            }
+
+            _shape = 1.0;
+            NotifyAll();
+        }
+
+        private void NotifyAll()
+        {
+            RaisePropertyChanged(nameof(TargetValue));
+            RaisePropertyChanged(nameof(LowerBound));
+            RaisePropertyChanged(nameof(UpperBound));
+            RaisePropertyChanged(nameof(Shape));
+            RaisePropertyChanged(nameof(ShapeHint));
+        }
+
+        // ── 校验 ──
+
+        public string? Validate()
+        {
+            if (Goal == "最大化")
+            {
+                if (_lowerBound >= _targetValue)
+                    return "最低可接受值必须小于目标值";
+            }
+            else if (Goal == "最小化")
+            {
+                if (_targetValue >= _upperBound)
+                    return "目标值必须小于最高可接受值";
+            }
+            else
+            {
+                if (_lowerBound >= _targetValue)
+                    return "下限必须小于目标值";
+                if (_targetValue >= _upperBound)
+                    return "目标值必须小于上限";
+            }
+            return null;
+        }
+
+        // ── 预览曲线 ──
+
         public void UpdatePreview()
         {
-            var model = new PlotModel
-            {
-                PlotMargins = new OxyThickness(40, 5, 10, 30)
-            };
+            double lower, upper, target;
+            GetEffectiveBounds(out lower, out upper, out target);
+
+            var model = new PlotModel { PlotMargins = new OxyThickness(40, 5, 10, 30) };
             model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "y", FontSize = 9 });
             model.Axes.Add(new LinearAxis
             {
@@ -127,95 +283,140 @@ namespace MaxChemical.Modules.DOE.Views
                 FontSize = 9
             });
 
-            double margin = (Upper - Lower) * 0.1;
-            double yMin = Lower - margin;
-            double yMax = Upper + margin;
-            int n = 100;
+            double range = upper - lower;
+            if (range < 1e-6) range = 1.0;
+            double margin = range * 0.15;
+            double yMin = lower - margin;
+            double yMax = upper + margin;
 
             var series = new LineSeries { Color = OxyColors.SteelBlue, StrokeThickness = 2 };
-
-            for (int i = 0; i <= n; i++)
+            for (int i = 0; i <= 100; i++)
             {
-                double y = yMin + (yMax - yMin) * i / n;
-                double d = ComputeD(y);
-                series.Points.Add(new DataPoint(y, d));
+                double y = yMin + (yMax - yMin) * i / 100.0;
+                series.Points.Add(new DataPoint(y, ComputeD(y, lower, upper, target)));
             }
             model.Series.Add(series);
 
-            // 标注 L, T, U 竖线
+            // 标注线
             model.Annotations.Add(new LineAnnotation
             {
                 Type = LineAnnotationType.Vertical,
-                X = Lower,
-                Color = OxyColors.Green,
-                LineStyle = LineStyle.Dot,
-                Text = "L"
-            });
-            model.Annotations.Add(new LineAnnotation
-            {
-                Type = LineAnnotationType.Vertical,
-                X = Target,
+                X = lower,
                 Color = OxyColors.Red,
-                LineStyle = LineStyle.Dash,
-                Text = "T"
+                LineStyle = LineStyle.Dot,
+                StrokeThickness = 1,
+                Text = "L",
+                TextColor = OxyColors.Red,
+                FontSize = 9
             });
+            if (Goal == "望目")
+            {
+                model.Annotations.Add(new LineAnnotation
+                {
+                    Type = LineAnnotationType.Vertical,
+                    X = target,
+                    Color = OxyColors.Orange,
+                    LineStyle = LineStyle.Dash,
+                    StrokeThickness = 1.5,
+                    Text = "T",
+                    TextColor = OxyColors.Orange,
+                    FontSize = 9
+                });
+            }
             model.Annotations.Add(new LineAnnotation
             {
                 Type = LineAnnotationType.Vertical,
-                X = Upper,
+                X = upper,
                 Color = OxyColors.Blue,
                 LineStyle = LineStyle.Dot,
-                Text = "U"
+                StrokeThickness = 1,
+                Text = "U",
+                TextColor = OxyColors.Blue,
+                FontSize = 9
             });
 
             PreviewPlot = model;
         }
 
-        private double ComputeD(double y)
+        private void GetEffectiveBounds(out double lower, out double upper, out double target)
         {
             if (Goal == "最大化")
             {
-                if (y <= Lower) return 0;
-                if (y >= Target) return 1;
-                var denom = Target - Lower;
-                return denom < 1e-12 ? 1 : Math.Pow((y - Lower) / denom, Shape);
+                lower = _lowerBound;
+                target = _targetValue;
+                upper = _targetValue;
             }
             else if (Goal == "最小化")
             {
-                if (y >= Upper) return 0;
-                if (y <= Target) return 1;
-                var denom = Upper - Target;
-                return denom < 1e-12 ? 1 : Math.Pow((Upper - y) / denom, Shape);
+                lower = _targetValue;
+                target = _targetValue;
+                upper = _upperBound;
             }
-            else // 望目
+            else
             {
-                if (y < Lower || y > Upper) return 0;
-                if (y <= Target)
-                { var denom = Target - Lower; return denom < 1e-12 ? 1 : Math.Pow((y - Lower) / denom, ShapeLower); }
-                else
-                { var denom = Upper - Target; return denom < 1e-12 ? 1 : Math.Pow((Upper - y) / denom, ShapeUpper); }
+                lower = _lowerBound;
+                target = _targetValue;
+                upper = _upperBound;
             }
         }
 
-        public DesirabilityResponseConfig ToConfig() => new()
+        private double ComputeD(double y, double lower, double upper, double target)
         {
-            ResponseName = ResponseName,
-            Goal = Goal switch
+            if (Goal == "最大化")
             {
-                "最大化" => DesirabilityGoal.Maximize,
-                "最小化" => DesirabilityGoal.Minimize,
-                "望目" => DesirabilityGoal.Target,
-                _ => DesirabilityGoal.Maximize
-            },
-            Lower = Lower,
-            Upper = Upper,
-            Target = Target,
-            Weight = 1.0,
-            Importance = Importance,
-            Shape = Shape,
-            ShapeLower = ShapeLower,
-            ShapeUpper = ShapeUpper
-        };
-    }
+                if (y <= lower) return 0;
+                if (y >= target) return 1;
+                double denom = target - lower;
+                return denom < 1e-12 ? 1 : Math.Pow((y - lower) / denom, _shape);
+            }
+            else if (Goal == "最小化")
+            {
+                if (y >= upper) return 0;
+                if (y <= target) return 1;
+                double denom = upper - target;
+                return denom < 1e-12 ? 1 : Math.Pow((upper - y) / denom, _shape);
+            }
+            else
+            {
+                if (y < lower || y > upper) return 0;
+                if (y <= target)
+                {
+                    double denom = target - lower;
+                    return denom < 1e-12 ? 1 : Math.Pow((y - lower) / denom, _shape);
+                }
+                else
+                {
+                    double denom = upper - target;
+                    return denom < 1e-12 ? 1 : Math.Pow((upper - y) / denom, _shape);
+                }
+            }
+        }
 
+        // ── 转为 Config ──
+
+        public DesirabilityResponseConfig ToConfig()
+        {
+            GetEffectiveBounds(out double lower, out double upper, out double target);
+
+            return new DesirabilityResponseConfig
+            {
+                ResponseName = ResponseName,
+                Goal = Goal switch
+                {
+                    "最大化" => DesirabilityGoal.Maximize,
+                    "最小化" => DesirabilityGoal.Minimize,
+                    "望目" => DesirabilityGoal.Target,
+                    _ => DesirabilityGoal.Maximize
+                },
+                Lower = lower,
+                Upper = upper,
+                Target = target,
+                Weight = 1.0,
+                Importance = Importance,
+                Shape = _shape,
+                ShapeLower = _shape,
+                ShapeUpper = _shape
+            };
+        }
+    }
 }

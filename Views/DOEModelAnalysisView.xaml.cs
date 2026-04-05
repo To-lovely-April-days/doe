@@ -100,45 +100,34 @@ namespace MaxChemical.Modules.DOE.Views
         {
             if (!_isDraggingProfiler || _draggingFactorName == null || _draggingPlotView == null) return;
             if (DataContext is not DOEModelAnalysisViewModel vm) return;
-            MoveCrosshair(_draggingPlotView, _draggingFactorName, e, vm);
+
+            if (_draggingIsCategorical)
+            {
+                var rawX = GetRawDataX(_draggingPlotView, e);
+                if (!rawX.HasValue) return;
+                var levels = vm.GetProfilerCategoryLevels(_draggingFactorName);
+                if (levels == null || levels.Count == 0) return;
+                int index = Math.Max(0, Math.Min(levels.Count - 1, (int)Math.Round(rawX.Value)));
+                vm.UpdateProfilerLocal(_draggingFactorName, levels[index]);
+            }
+            else
+            {
+                var newX = ClampXToRange(_draggingPlotView, e, vm, _draggingFactorName);
+                if (!newX.HasValue) return;
+                vm.UpdateProfilerLocal(_draggingFactorName, newX.Value);
+            }
         }
 
-        private async void Profiler_MouseUp(object sender, MouseButtonEventArgs e)
+        private void Profiler_MouseUp(object sender, MouseButtonEventArgs e)
         {
             if (!_isDraggingProfiler) return;
-            if (DataContext is not DOEModelAnalysisViewModel vm) return;
 
-            var factorName = _draggingFactorName!;
-            var plotView = _draggingPlotView!;
-            var isCat = _draggingIsCategorical;
-
-            plotView.ReleaseMouseCapture();
+            _draggingPlotView?.ReleaseMouseCapture();
             _isDraggingProfiler = false;
             _draggingFactorName = null;
             _draggingPlotView = null;
 
-            if (isCat)
-            {
-                // ★ 类别因子: X 四舍五入到最近的水平索引 → 传水平名
-                var levels = vm.GetProfilerCategoryLevels(factorName);
-                if (levels == null || levels.Count == 0) return;
-
-                var rawX = GetRawDataX(plotView, e);
-                if (!rawX.HasValue) return;
-
-                int index = (int)Math.Round(rawX.Value);
-                index = Math.Max(0, Math.Min(levels.Count - 1, index));
-
-                await vm.UpdateProfilerCategoryAsync(factorName, levels[index]);
-            }
-            else
-            {
-                // ★ 连续因子: 传数值
-                var newX = ClampXToRange(plotView, e, vm, factorName);
-                if (!newX.HasValue) return;
-
-                await vm.UpdateProfilerValueAsync(factorName, newX.Value);
-            }
+            // ★ 不调 Python，拖动过程中已经实时计算完毕
         }
 
         /// <summary>
@@ -180,6 +169,7 @@ namespace MaxChemical.Modules.DOE.Views
             }
 
             // 更新红色竖线
+            // 更新红色竖线（不再显示 Text）
             var vline = model.Annotations
                 .OfType<OxyPlot.Annotations.LineAnnotation>()
                 .FirstOrDefault(a => a.Type == OxyPlot.Annotations.LineAnnotationType.Vertical
@@ -187,8 +177,19 @@ namespace MaxChemical.Modules.DOE.Views
             if (vline != null)
             {
                 vline.X = newX.Value;
-                if (!_draggingIsCategorical)
-                    vline.Text = $"{newX.Value:F1}";
+            }
+
+            // ★ 更新 Subtitle 显示当前值
+            if (_draggingIsCategorical)
+            {
+                var levels = vm.GetProfilerCategoryLevels(factorName);
+                int idx = (int)Math.Round(newX.Value);
+                var levelName = (levels != null && idx >= 0 && idx < levels.Count) ? levels[idx] : "?";
+                model.Subtitle = levelName;
+            }
+            else
+            {
+                model.Subtitle = $"{newX.Value:F2}";
             }
 
             // 更新红色横线
@@ -199,18 +200,26 @@ namespace MaxChemical.Modules.DOE.Views
                 hline.Y = newY.Value;
 
             // 更新顶部预测值
+            // ★ 更新顶部预测值（追加置信区间）
             if (newY.HasValue)
             {
+                string ciText = "";
                 if (_draggingIsCategorical)
                 {
                     var levels = vm.GetProfilerCategoryLevels(factorName);
                     int idx = (int)Math.Round(newX.Value);
                     var levelName = (levels != null && idx >= 0 && idx < levels.Count) ? levels[idx] : "?";
-                    vm.ProfilerCurrentPredicted = $"{factorName}={levelName}  →  预测值={newY.Value:F4}";
+                    var (lo, hi) = vm.GetProfilerCategoryCIAtIndex(factorName, idx);
+                    if (lo.HasValue && hi.HasValue)
+                        ciText = $"  95%CI [{lo.Value:F4}, {hi.Value:F4}]";
+                    vm.ProfilerCurrentPredicted = $"{factorName}={levelName}  →  预测值={newY.Value:F4}{ciText}";
                 }
                 else
                 {
-                    vm.ProfilerCurrentPredicted = $"{factorName}={newX.Value:F2}  →  预测值={newY.Value:F4}";
+                    var (lo, hi) = vm.GetProfilerCIAtX(factorName, newX.Value);
+                    if (lo.HasValue && hi.HasValue)
+                        ciText = $"  95%CI [{lo.Value:F4}, {hi.Value:F4}]";
+                    vm.ProfilerCurrentPredicted = $"{factorName}={newX.Value:F2}  →  预测值={newY.Value:F4}{ciText}";
                 }
             }
 
@@ -337,6 +346,10 @@ namespace MaxChemical.Modules.DOE.Views
             _draggingDesirabilityFactorName = factorName;
             _draggingDesirabilityPlotView = plotView;
             plotView.CaptureMouse();
+
+            // ★ 立即移动到点击位置
+            DesirabilityProfiler_MouseMove(sender, e);
+
             e.Handled = true;
         }
 
@@ -357,45 +370,23 @@ namespace MaxChemical.Modules.DOE.Views
             var (min, max) = vm.GetProfilerFactorRange(_draggingDesirabilityFactorName);
             newX = Math.Max(min, Math.Min(max, newX));
 
-            // ★ 移动红线 + 更新文字
-            var vline = plotModel.Annotations
-                .OfType<OxyPlot.Annotations.LineAnnotation>()
-                .FirstOrDefault(a => a.Type == OxyPlot.Annotations.LineAnnotationType.Vertical
-                                     && a.Color == OxyColors.Red);
-            if (vline != null)
-            {
-                vline.X = newX;
-            }
-
-            // ★ 更新 X 轴 Title（需要用 true 触发完整重绘）
-            xAxis.Title = $"{newX:F2}";
-
-            plotModel.InvalidatePlot(true);
+            // ★ 直接用 C# 预测器更新所有图
+            vm.UpdateProfilerLocal(_draggingDesirabilityFactorName, newX);
         }
 
 
-        private async void DesirabilityProfiler_MouseUp(object sender, MouseButtonEventArgs e)
+        private void DesirabilityProfiler_MouseUp(object sender, MouseButtonEventArgs e)
         {
             if (!_isDraggingDesirability) return;
-            if (DataContext is not DOEModelAnalysisViewModel vm) return;
 
-            var factorName = _draggingDesirabilityFactorName!;
-            var plotView = _draggingDesirabilityPlotView!;
-
-            plotView.ReleaseMouseCapture();
+            _draggingDesirabilityPlotView?.ReleaseMouseCapture();
             _isDraggingDesirability = false;
             _draggingDesirabilityFactorName = null;
             _draggingDesirabilityPlotView = null;
 
-            // ★ 松开时才调用 Python 更新
-            var rawX = GetRawDataX(plotView, e);
-            if (!rawX.HasValue) return;
-
-            var (min, max) = vm.GetProfilerFactorRange(factorName);
-            double newX = Math.Max(min, Math.Min(max, rawX.Value));
-
-            await vm.UpdateProfilerValueAsync(factorName, newX);
+            // ★ 不调 Python
         }
+
 
         /// <summary>
         /// 找到 PlotView 所在的 ItemsControl

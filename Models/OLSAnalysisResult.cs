@@ -65,6 +65,18 @@ namespace MaxChemical.Modules.DOE.Models
         /// ★ v7 新增: 用户请求的原始模型类型
         /// </summary>
         public string OriginalModelType { get; set; } = string.Empty;
+        [JsonProperty("xtx_inv_flat")]
+        public double[]? XtxInvFlat { get; set; }
+
+        [JsonProperty("sigma")]
+        public double Sigma { get; set; }
+
+        [JsonProperty("t_crit")]
+        public double TCrit { get; set; }
+
+        [JsonProperty("param_count")]
+        public int ParamCount { get; set; }
+
     }
 
     /// <summary>

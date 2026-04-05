@@ -198,6 +198,12 @@ namespace MaxChemical.Modules.DOE.Services
             result.InestimableWarning = pyResult.InestimableWarning ?? "";
             result.OriginalModelType = pyResult.OriginalModelType ?? defaultModelType;
 
+            result.XtxInvFlat = pyResult.XtxInvFlat;
+            result.Sigma = pyResult.Sigma;
+            result.TCrit = pyResult.TCrit;
+            result.ParamCount = pyResult.ParamCount;
+
+
             return result;
         }
 
@@ -812,6 +818,11 @@ namespace MaxChemical.Modules.DOE.Services
             [JsonProperty("uncoded_equation")] public string? UncodedEquation { get; set; }
             [JsonProperty("uncoded_equations")] public EquationsInfo? UncodedEquations { get; set; }
             [JsonProperty("coding_info")] public Dictionary<string, CodingInfoItem>? CodingInfo { get; set; }
+
+            [JsonProperty("xtx_inv_flat")] public double[]? XtxInvFlat { get; set; }
+            [JsonProperty("sigma")] public double Sigma { get; set; }
+            [JsonProperty("t_crit")] public double TCrit { get; set; }
+            [JsonProperty("param_count")] public int ParamCount { get; set; }
         }
 
         private class PyAnovaRow

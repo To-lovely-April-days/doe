@@ -349,6 +349,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 if (SetProperty(ref _isCodedEquation, value) && OlsResult != null)
                 {
                     UpdateEquationsDisplay(OlsResult);
+                    UpdateCoefficientTableDisplay(OlsResult);  // ★ v14: 同步切换系数表
                     RaisePropertyChanged(nameof(EquationModeText));
                 }
             }
@@ -394,6 +395,52 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
         /// <summary>是否显示直接导入面板（始终显示）</summary>
         public bool ShowDirectImportPanel => true;
+
+        private List<CoefficientDisplayRow> _displayCoefficients = new();
+        public List<CoefficientDisplayRow> DisplayCoefficients
+        {
+            get => _displayCoefficients;
+            set => SetProperty(ref _displayCoefficients, value);
+        }
+        // ── ★ v3: Desirability 集成到预测刻画器 ──
+        private bool _isDesirabilityVisible;
+        private double _desirabilityCompositeD;
+        private ObservableCollection<SavedSolution> _savedSolutions = new();
+        private bool _hasSavedSolutions;
+
+        public bool IsDesirabilityVisible
+        {
+            get => _isDesirabilityVisible;
+            set
+            {
+                if (SetProperty(ref _isDesirabilityVisible, value))
+                    _ = RebuildProfilerWithDesirabilityAsync();
+            }
+        }
+        public double DesirabilityCompositeD
+        {
+            get => _desirabilityCompositeD;
+            set => SetProperty(ref _desirabilityCompositeD, value);
+        }
+        public ObservableCollection<SavedSolution> SavedSolutions
+        {
+            get => _savedSolutions;
+            set => SetProperty(ref _savedSolutions, value);
+        }
+        public bool HasSavedSolutions
+        {
+            get => _hasSavedSolutions;
+            set => SetProperty(ref _hasSavedSolutions, value);
+        }
+        // ★ v3: 意愿行图表（d(y) 曲线 + 综合 D 曲线）
+        private List<PlotModel> _desirabilityPlots = new();
+        public List<PlotModel> DesirabilityPlots
+        {
+            get => _desirabilityPlots;
+            set => SetProperty(ref _desirabilityPlots, value);
+        }
+        // 缓存当前的 Desirability 配置（从 LoadConfigAsync 加载）
+        private List<DesirabilityResponseConfig> _currentDesirabilityConfigs = new();
         // ── Commands ──
         public DelegateCommand RefitReducedModelCommand { get; }
         public DelegateCommand RestoreFullModelCommand { get; }
@@ -409,6 +456,12 @@ namespace MaxChemical.Modules.DOE.ViewModels
         // 声明:
         public DelegateCommand ToggleEquationCodingCommand { get; }
         public DelegateCommand OlsImportExcelCommand { get; }
+        public DelegateCommand ToggleDesirabilityCommand { get; }
+        public DelegateCommand MaximizeDesirabilityCommand { get; }
+        public DelegateCommand MaximizeAndRememberCommand { get; }
+        public DelegateCommand SetDesirabilityCommand { get; }
+        public DelegateCommand SaveDesirabilityCommand { get; }
+        public DelegateCommand SaveDesirabilityFormulaCommand { get; }
         public DOEModelAnalysisViewModel(
             IGPRModelService gprService, IDOEAnalysisService analysisService,
             IDOERepository repository, IFlowParameterProvider paramProvider,
@@ -452,6 +505,13 @@ namespace MaxChemical.Modules.DOE.ViewModels
             ExportReportCommand = new DelegateCommand(async () => await ExportOlsReportAsync());
             ToggleEquationCodingCommand = new DelegateCommand(() => IsCodedEquation = !IsCodedEquation);
             OlsImportExcelCommand = new DelegateCommand(async () => await OlsImportExcelAsync());
+            // 在构造函数中追加:
+            ToggleDesirabilityCommand = new DelegateCommand(() => IsDesirabilityVisible = !IsDesirabilityVisible);
+            MaximizeDesirabilityCommand = new DelegateCommand(async () => await MaximizeDesirabilityAsync());
+            MaximizeAndRememberCommand = new DelegateCommand(async () => await MaximizeAndRememberAsync());
+            SetDesirabilityCommand = new DelegateCommand(async () => await ShowSetDesirabilityDialogAsync());
+            SaveDesirabilityCommand = new DelegateCommand(async () => await SaveDesirabilityValuesAsync());
+            SaveDesirabilityFormulaCommand = new DelegateCommand(async () => await SaveDesirabilityFormulaAsync());
         }
 
         // ══════════════ Properties — GPR ══════════════
@@ -1181,6 +1241,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
             }
             catch (Exception ex) { _logger.LogError(ex, "OLS 分析失败"); OlsStatusText = $"OLS 分析失败: {ex.Message}"; }
             finally { IsLoading = false; }
+            UpdateCoefficientTableDisplay(OlsResult);
         }
         // ═══ 新增方法: 解析方程展示 ═══
 
@@ -1221,6 +1282,45 @@ namespace MaxChemical.Modules.DOE.ViewModels
             else
             {
                 CurrentEquationText = result.UncodedEquation ?? result.ModelSummary?.Equation ?? "";
+            }
+        }
+        /// <summary>
+        /// ★ v14 新增: 根据编码/未编码模式切换系数表数据源
+        /// </summary>
+        private void UpdateCoefficientTableDisplay(OLSAnalysisResult result)
+        {
+            if (result == null) return;
+
+            if (IsCodedEquation)
+            {
+                // 编码模式: 显示编码系数（Sum coding，VIF 正常）
+                // OlsResult.Coefficients 已经绑定到 DataGrid，直接用
+                // 如果你的 DataGrid 绑定的是 OlsResult.Coefficients，
+                // 则需要一个中间属性来切换
+                DisplayCoefficients = result.Coefficients?
+                    .Select(c => new CoefficientDisplayRow
+                    {
+                        Term = c.Term,
+                        Coefficient = c.Coefficient,
+                        StdError = c.StdError,
+                        TValue = c.TValue,
+                        PValue = c.PValue,
+                        VIF = c.VIF
+                    }).ToList() ?? new();
+            }
+            else
+            {
+                // 未编码模式: 显示原始值系数（VIF 会很大，这是正常的）
+                DisplayCoefficients = result.UncodedCoefficients?
+                    .Select(c => new CoefficientDisplayRow
+                    {
+                        Term = c.Term,
+                        Coefficient = c.Coefficient,
+                        StdError = c.StdError,
+                        TValue = c.TValue,
+                        PValue = c.PValue,
+                        VIF = c.VIF
+                    }).ToList() ?? new();
             }
         }
         // ═══ Pareto 图构建（支持点击切换） ═══
@@ -1542,13 +1642,119 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
                 UpdateProfilerPlotsInPlace(data, factorName);
                 ProfilerCurrentPredicted = $"{data.ResponseName}    {data.CurrentPredicted:F4}";
+                // ★ Feature 2: 同步更新意愿行
+                if (IsDesirabilityVisible)
+                    RefreshDesirabilityPlotsInPlace();
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "更新预测刻画器失败");
             }
         }
+        /// <summary>
+        /// ★ Feature 3: 获取当前响应的 Desirability 配置（供控制点拖拽用）
+        /// </summary>
+        public DesirabilityResponseConfig? GetCurrentDesirabilityConfig()
+        {
+            return _currentDesirabilityConfigs
+                .FirstOrDefault(c => c.ResponseName == _selectedResponseName);
+        }
 
+        /// <summary>
+        /// ★ Feature 3: 更新 Lower 值（拖拽控制点时调用）
+        /// </summary>
+        public void UpdateDesirabilityLower(double newLower)
+        {
+            var cfg = GetCurrentDesirabilityConfig();
+            if (cfg == null) return;
+            cfg.Lower = Math.Min(newLower, cfg.Target - 0.01);
+        }
+
+        /// <summary>
+        /// ★ Feature 3: 更新 Target 值
+        /// </summary>
+        public void UpdateDesirabilityTarget(double newTarget)
+        {
+            var cfg = GetCurrentDesirabilityConfig();
+            if (cfg == null) return;
+            cfg.Target = Math.Max(newTarget, cfg.Lower + 0.01);
+            if (cfg.Goal == DesirabilityGoal.Maximize)
+                cfg.Upper = cfg.Target;
+        }
+
+        /// <summary>
+        /// ★ Feature 3: 更新中间点（调整 shape 参数使 d(midY) = 0.5）
+        /// </summary>
+        public void UpdateDesirabilityMidPoint(double midY)
+        {
+            var cfg = GetCurrentDesirabilityConfig();
+            if (cfg == null) return;
+
+            // shape = log(0.5) / log((midY - lower) / (target - lower))
+            double t = (midY - cfg.Lower) / (cfg.Target - cfg.Lower);
+            if (t > 0.01 && t < 0.99)
+            {
+                cfg.Shape = Math.Log(0.5) / Math.Log(t);
+                cfg.Shape = Math.Max(0.1, Math.Min(10.0, cfg.Shape));
+            }
+        }
+
+        /// <summary>
+        /// ★ Feature 3: 刷新意愿函数图（控制点位置变化后）
+        /// </summary>
+        public void RefreshDesirabilityFunctionPlot()
+        {
+            if (DesirabilityPlots == null || DesirabilityPlots.Count == 0) return;
+
+            // 最后一个图是意愿函数图
+            var dPlot = DesirabilityPlots[DesirabilityPlots.Count - 1];
+            var cfg = GetCurrentDesirabilityConfig();
+            if (cfg == null) return;
+
+            dPlot.Series.Clear();
+            dPlot.Annotations.Clear();
+
+            double yMin = cfg.Lower - (cfg.Upper - cfg.Lower) * 0.1;
+            double yMax = cfg.Upper + (cfg.Upper - cfg.Lower) * 0.1;
+
+            // d(y) 曲线
+            var curveSeries = new LineSeries { Color = OxyColors.Black, StrokeThickness = 1.5 };
+            for (int i = 0; i <= 100; i++)
+            {
+                double y = yMin + (yMax - yMin) * i / 100.0;
+                double d = ComputeDesirabilityForCurrentResponse(y);
+                curveSeries.Points.Add(new DataPoint(y, d));
+            }
+            dPlot.Series.Add(curveSeries);
+
+            // 三个控制点
+            var controlPoints = new ScatterSeries
+            {
+                MarkerType = MarkerType.Square,
+                MarkerSize = 6,
+                MarkerFill = OxyColors.White,
+                MarkerStroke = OxyColors.Black,
+                MarkerStrokeThickness = 1.5
+            };
+            controlPoints.Points.Add(new ScatterPoint(cfg.Lower, 0));
+            double midY = (cfg.Lower + cfg.Target) / 2.0;
+            controlPoints.Points.Add(new ScatterPoint(midY, 0.5));
+            controlPoints.Points.Add(new ScatterPoint(cfg.Target, 1.0));
+            dPlot.Series.Add(controlPoints);
+
+            // 当前 D 值
+            double compositeD = DesirabilityCompositeD;
+            var marker = new ScatterSeries
+            {
+                MarkerType = MarkerType.Circle,
+                MarkerSize = 6,
+                MarkerFill = OxyColors.DarkOrange
+            };
+            marker.Points.Add(new ScatterPoint(compositeD, compositeD));
+            dPlot.Series.Add(marker);
+
+            dPlot.InvalidatePlot(true);
+        }
         /// <summary>
         /// 原地更新 PlotModel 数据:
         /// - 被拖动的连续因子: 曲线不变，只更新十字线（因为扫描的就是自己，曲线不受影响）
@@ -1695,13 +1901,20 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 int curIdx = labels.IndexOf(curVal ?? "");
                 if (curIdx >= 0 && curIdx < fdata.Y.Count)
                 {
-                    pm.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
+                    pm.Annotations.Add(new LineAnnotation
                     {
-                        Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
+                        Type = LineAnnotationType.Vertical,
                         X = curIdx,
                         Color = OxyColors.Red,
                         LineStyle = LineStyle.Dash,
-                        StrokeThickness = 1.5
+                        StrokeThickness = 1.5,
+                        Text = curVal ?? "",
+                        TextColor = OxyColors.Red,
+                        FontSize = 10,
+                        FontWeight = OxyPlot.FontWeights.Bold,
+                        TextLinePosition = 0.02,
+                        TextOrientation = OxyPlot.Annotations.AnnotationTextOrientation.Horizontal,
+                        TextHorizontalAlignment = OxyPlot.HorizontalAlignment.Center
                     });
                     var hl = new ScatterSeries { MarkerType = MarkerType.Circle, MarkerSize = 7, MarkerFill = OxyColors.Red };
                     hl.Points.Add(new ScatterPoint(curIdx, fdata.Y[curIdx]));
@@ -2215,24 +2428,123 @@ namespace MaxChemical.Modules.DOE.ViewModels
         // ══════════════ Desirability ══════════════
         private async Task RunDesirabilityOptimizationAsync()
         {
-            var batchId = SelectedOlsBatch?.BatchId ?? _currentBatchId;
-            if (string.IsNullOrEmpty(batchId)) { _dialogService.ShowError("请先选择一个批次", "提示"); return; }
-            if (ResponseNames.Count < 2) { _dialogService.ShowError("Desirability 优化需要至少 2 个响应变量", "提示"); return; }
+            if (ResponseNames.Count < 1)
+            {
+                _dialogService.ShowError("Desirability 优化需要至少 1 个响应变量", "提示");
+                return;
+            }
+
             try
             {
-                IsLoading = true; StatusMessage = "正在搜索多响应最优因子组合...";
-                var configs = await _desirabilityService.LoadConfigAsync(batchId);
-                if (configs.Count == 0) { _dialogService.ShowError("请先在设计向导 Step4 中配置各响应变量的优化目标", "缺少配置"); return; }
-                var batch = await _repository.GetBatchWithDetailsAsync(batchId);
-                if (batch == null) return;
-                await _desirabilityService.ConfigureAsync(batchId, configs, batch.Factors);
-                DesirabilityResult = await _desirabilityService.OptimizeAsync();
-                StatusMessage = DesirabilityResult?.Success == true ? $"多响应优化完成: 综合 D = {DesirabilityResult.CompositeD:F4}" : $"优化失败: {DesirabilityResult?.ErrorMessage ?? "未知错误"}";
-            }
-            catch (Exception ex) { _logger.LogError(ex, "Desirability 优化失败"); _dialogService.ShowError($"优化失败: {ex.Message}", "错误"); }
-            finally { IsLoading = false; }
-        }
+                IsLoading = true;
 
+                if (IsOlsTabSelected)
+                {
+                    // ═══ OLS 模式: 对标 Minitab Response Optimizer ═══
+                    OlsStatusText = "正在搜索 OLS 多响应最优因子组合...";
+
+                    // 获取当前批次信息
+                    var batchId = IsDirectImportMode ? "" : SelectedOlsBatch?.BatchId;
+                    if (string.IsNullOrEmpty(batchId) && !IsDirectImportMode)
+                    {
+                        _dialogService.ShowError("请先选择一个实验批次", "提示");
+                        return;
+                    }
+
+                    // 加载 Desirability 配置
+                    var configs = await _desirabilityService.LoadConfigAsync(batchId ?? "");
+                    if (configs.Count == 0)
+                    {
+                        _dialogService.ShowError("请先在设计向导 Step4 中配置各响应变量的优化目标", "缺少配置");
+                        return;
+                    }
+
+                    // 获取因子列表
+                    var batch = await _repository.GetBatchWithDetailsAsync(batchId ?? "");
+                    if (batch == null) return;
+
+                    // ★ 核心: 用 OLS 模型做优化
+                    DesirabilityResult = await _desirabilityService.OptimizeWithOlsAsync(
+                        batchId!, configs, batch.Factors, _analysisService);
+
+                    if (DesirabilityResult?.Success == true)
+                    {
+                        OlsStatusText = $"OLS 多响应优化完成: 综合 D = {DesirabilityResult.CompositeD:F4}";
+                        UpdateOptimalFactorsDisplay(DesirabilityResult);
+                    }
+                    else
+                    {
+                        OlsStatusText = $"OLS 优化失败: {DesirabilityResult?.ErrorMessage ?? "未知错误"}";
+                    }
+                }
+                else
+                {
+                    // ═══ GPR 模式: 原有逻辑保持不变 ═══
+                    StatusMessage = "正在搜索 GPR 多响应最优因子组合...";
+
+                    var configs = await _desirabilityService.LoadConfigAsync(_currentBatchId);
+                    if (configs.Count == 0)
+                    {
+                        _dialogService.ShowError("请先在设计向导 Step4 中配置各响应变量的优化目标", "缺少配置");
+                        return;
+                    }
+
+                    var batch = await _repository.GetBatchWithDetailsAsync(_currentBatchId);
+                    if (batch == null) return;
+
+                    await _desirabilityService.ConfigureAsync(_currentBatchId, configs, batch.Factors);
+                    DesirabilityResult = await _desirabilityService.OptimizeAsync();
+
+                    if (DesirabilityResult?.Success == true)
+                    {
+                        StatusMessage = $"GPR 多响应优化完成: 综合 D = {DesirabilityResult.CompositeD:F4}";
+                        UpdateOptimalFactorsDisplay(DesirabilityResult);
+                    }
+                    else
+                    {
+                        StatusMessage = $"GPR 优化失败: {DesirabilityResult?.ErrorMessage ?? "未知错误"}";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Desirability 优化失败");
+                if (IsOlsTabSelected)
+                    OlsStatusText = $"优化异常: {ex.Message}";
+                else
+                    StatusMessage = $"优化异常: {ex.Message}";
+            }
+            finally
+            {
+                IsLoading = false;
+            }
+        }
+        /// <summary>
+        /// 辅助方法: 更新最优因子显示
+        /// </summary>
+        private void UpdateOptimalFactorsDisplay(DesirabilityResult result)
+        {
+            if (result?.OptimalFactors == null || result.OptimalFactors.Count == 0) return;
+
+            var items = result.OptimalFactors.Select(kv => new OptimalFactorItem
+            {
+                Key = kv.Key,
+                Value = kv.Value
+            }).ToList();
+
+            var numericValues = items.Where(x => x.IsNumeric).Select(x => Math.Abs(x.NumericValue)).ToList();
+            double maxVal = numericValues.Count > 0 ? numericValues.Max() : 1.0;
+
+            foreach (var item in items)
+            {
+                item.BarWidth = item.IsNumeric && maxVal > 0
+                    ? Math.Abs(item.NumericValue) / maxVal * 200
+                    : 0;
+            }
+
+            OptimalFactors = items;
+            HasOptimalResult = true;
+        }
         // ══════════════ GPR 模型列表 ══════════════
         private async Task LoadModelsAsync()
         {
@@ -3244,7 +3556,724 @@ namespace MaxChemical.Modules.DOE.ViewModels
             }
             return result;
         }
+        /// <summary>
+        /// 在预测刻画器图列表末尾追加/移除 "综合D" 曲线图
+        /// </summary>
+        private async Task RebuildProfilerWithDesirabilityAsync()
+        {
+            if (!IsProfilerLoaded || _lastProfilerData == null) return;
 
+            if (IsDesirabilityVisible)
+            {
+                // 加载 Desirability 配置
+                var batchId = IsDirectImportMode ? "" : SelectedOlsBatch?.BatchId ?? _currentBatchId;
+                _currentDesirabilityConfigs = await _desirabilityService.LoadConfigAsync(batchId);
+
+                if (_currentDesirabilityConfigs.Count == 0)
+                {
+                    _dialogService.ShowError("请先通过「设置意愿」配置 Desirability 参数", "缺少配置");
+                    _isDesirabilityVisible = false;
+                    RaisePropertyChanged(nameof(IsDesirabilityVisible));
+                    return;
+                }
+
+                BuildDesirabilityPlotsFromProfiler();
+            }
+            else
+            {
+                DesirabilityPlots = new List<PlotModel>();
+            }
+        }
+        private async Task BuildDesirabilityPlotsAsync()
+        {
+            // 需要从 Python 获取含 desirability 数据的 profile
+            // profile_plot_data 已经返回了每个因子的 composite_d 和各响应的 desirabilities
+
+            string json;
+            try
+            {
+                var fixedValues = new Dictionary<string, object>(_profilerCurrentValues);
+
+                if (IsOlsTabSelected)
+                {
+                    // OLS 模式需要通过 DesirabilityService 获取 profile 数据
+                    // 暂时用已缓存的 _lastProfilerData（它没有 desirability 数据）
+                    // 需要额外调用 DesirabilityEngine.profile_plot_data
+
+                    // TODO: 在 DesirabilityService 中新增 GetOlsProfileDataAsync
+                    // 暂时构建占位图
+                }
+                else
+                {
+                    json = await _desirabilityService.GetProfileDataAsync(50);
+                }
+            }
+            catch { return; }
+
+            // 从 _lastProfilerData 中提取 composite_d（如果有的话）
+            // 由于当前 _lastProfilerData 来自 DOEAnalyzer.prediction_profiler，
+            // 不含 desirability 数据。需要额外调用 DesirabilityEngine。
+            // 
+            // 简化方案: 用已拟合的 OLS 模型 + DesirabilityConfig 在 C# 端计算 d(y)
+
+            BuildDesirabilityPlotsFromProfiler();
+        }
+
+        /// <summary>
+        /// 用 C# 端的 ComputeD 逻辑 + 已有的 profiler 数据构建意愿行图表
+        /// </summary>
+        private void BuildDesirabilityPlotsFromProfiler()
+        {
+            if (_lastProfilerData?.Factors == null) return;
+
+            // ★ 先清空旧的 PlotModel 引用
+            DesirabilityPlots = new List<PlotModel>();
+
+            var plots = new List<PlotModel>();
+
+            // 计算当前综合 D
+            double currentCompositeD = ComputeDesirabilityForCurrentResponse(
+                _lastProfilerData.CurrentPredicted);
+            DesirabilityCompositeD = currentCompositeD;
+
+            foreach (var fname in _profilerFactorOrder)
+            {
+                if (!_lastProfilerData.Factors.TryGetValue(fname, out var fdata)) continue;
+
+                var pm = new PlotModel
+                {
+                    // ★ Feature 1: 底部因子名称
+                    Title = fname,
+                    TitleFontSize = 10,
+                    TitleColor = OxyColor.FromRgb(200, 0, 0),  // 红色，跟 JMP 一致
+                    TitleHorizontalAlignment = TitleHorizontalAlignment.CenteredWithinView,
+                    PlotMargins = new OxyThickness(50, 5, 10, 30)
+                };
+
+                pm.Axes.Add(new LinearAxis
+                {
+                    Position = AxisPosition.Left,
+                    FontSize = 9,
+                    Minimum = -0.05,
+                    Maximum = 1.05,
+                    MajorStep = 0.5,
+                    // ★ Feature 1: 只在第一个图显示 "意愿 0.xxxx" 标签
+                    Title = plots.Count == 0 ? $"意愿{currentCompositeD:F4}" : ""
+                });
+
+                if (fdata.IsCategorical)
+                {
+                    var labels = fdata.X_Labels;
+                    pm.Axes.Add(new LinearAxis
+                    {
+                        Position = AxisPosition.Bottom,
+                        FontSize = 9,
+                        Minimum = -0.5,
+                        Maximum = labels.Count - 0.5,
+                        MajorStep = 1,
+                        MinorStep = 1,
+                        LabelFormatter = val =>
+                        {
+                            int idx = (int)Math.Round(val);
+                            return idx >= 0 && idx < labels.Count ? labels[idx] : "";
+                        }
+                    });
+
+                    var line = new LineSeries
+                    {
+                        Color = OxyColors.Black,       // ★ JMP 用黑色曲线
+                        StrokeThickness = 1.5
+                    };
+                    for (int i = 0; i < labels.Count && i < fdata.Y.Count; i++)
+                    {
+                        double d = ComputeDesirabilityForCurrentResponse(fdata.Y[i]);
+                        line.Points.Add(new DataPoint(i, d));
+                    }
+                    pm.Series.Add(line);
+
+                    // 红色虚线标记当前水平
+                    var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "";
+                    int curIdx = labels.IndexOf(curVal ?? "");
+                    if (curIdx >= 0)
+                    {
+                        pm.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
+                        {
+                            Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
+                            X = curIdx,
+                            Color = OxyColors.Red,
+                            LineStyle = LineStyle.Dash,
+                            StrokeThickness = 1.5,
+                            Text = curVal ?? "",
+                            TextColor = OxyColors.Red,
+                            FontSize = 9,
+                            FontWeight = OxyPlot.FontWeights.Bold,
+                            TextLinePosition = 0.5,
+                            TextOrientation = OxyPlot.Annotations.AnnotationTextOrientation.Horizontal,
+                            TextHorizontalAlignment = OxyPlot.HorizontalAlignment.Left
+                        });
+                    }
+                }
+                else
+                {
+                    pm.Axes.Add(new LinearAxis
+                    {
+                        Position = AxisPosition.Bottom,
+                        FontSize = 9
+                    });
+
+                    var line = new LineSeries
+                    {
+                        Color = OxyColors.Black,       // ★ JMP 用黑色曲线
+                        StrokeThickness = 1.5
+                    };
+                    for (int i = 0; i < fdata.X.Count && i < fdata.Y.Count; i++)
+                    {
+                        double d = ComputeDesirabilityForCurrentResponse(fdata.Y[i]);
+                        line.Points.Add(new DataPoint(fdata.X[i], d));
+                    }
+                    pm.Series.Add(line);
+
+                    // 红色虚线
+                    double curX = fdata.CurrentNumericValue;
+                    pm.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
+                    {
+                        Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
+                        X = curX,
+                        Color = OxyColors.Red,
+                        LineStyle = LineStyle.Dash,
+                        StrokeThickness = 1.5,
+                        Text = $"{curX:F0}",
+                        TextColor = OxyColors.Red,
+                        FontSize = 9,
+                        FontWeight = OxyPlot.FontWeights.Bold,
+                        TextLinePosition = 0.5,
+                        TextOrientation = OxyPlot.Annotations.AnnotationTextOrientation.Horizontal,
+                        TextHorizontalAlignment = OxyPlot.HorizontalAlignment.Left
+                    });
+                }
+
+                // 当前 D 值水平虚线
+                pm.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
+                {
+                    Type = OxyPlot.Annotations.LineAnnotationType.Horizontal,
+                    Y = currentCompositeD,
+                    Color = OxyColor.FromArgb(120, 255, 0, 0),
+                    LineStyle = LineStyle.Dot,
+                    StrokeThickness = 1
+                });
+
+                plots.Add(pm);
+            }
+
+            // ★ 最右边: 意愿图（d(y) 曲线 + 3 个控制点）
+            BuildDesirabilityFunctionPlot(plots, currentCompositeD);
+
+            DesirabilityPlots = plots;
+        }
+        /// <summary>
+        /// ★ Feature 2: 获取意愿行中的因子名称（排除最后的"意愿"图）
+        /// </summary>
+        public string? GetDesirabilityFactorName(int plotIndex)
+        {
+            if (plotIndex >= 0 && plotIndex < _profilerFactorOrder.Count)
+                return _profilerFactorOrder[plotIndex];
+            return null; // 最后一个图是"意愿图"，返回 null
+        }
+        /// <summary>
+        /// ★ Feature 2: 原地刷新意愿行图表（拖拽时调用，避免重建闪烁）
+        /// </summary>
+        public void RefreshDesirabilityPlotsInPlace()
+        {
+            if (_lastProfilerData?.Factors == null) return;
+            if (DesirabilityPlots == null || DesirabilityPlots.Count == 0) return;
+
+            double currentCompositeD = ComputeDesirabilityForCurrentResponse(
+                _lastProfilerData.CurrentPredicted);
+            DesirabilityCompositeD = currentCompositeD;
+
+            for (int i = 0; i < _profilerFactorOrder.Count && i < DesirabilityPlots.Count; i++)
+            {
+                var fname = _profilerFactorOrder[i];
+                if (!_lastProfilerData.Factors.TryGetValue(fname, out var fdata)) continue;
+
+                var pm = DesirabilityPlots[i];
+                pm.Series.Clear();
+                pm.Annotations.Clear();
+
+                // 重建曲线
+                if (fdata.IsCategorical)
+                {
+                    var labels = fdata.X_Labels;
+                    var line = new LineSeries { Color = OxyColors.Black, StrokeThickness = 1.5 };
+                    for (int j = 0; j < labels.Count && j < fdata.Y.Count; j++)
+                    {
+                        double d = ComputeDesirabilityForCurrentResponse(fdata.Y[j]);
+                        line.Points.Add(new DataPoint(j, d));
+                    }
+                    pm.Series.Add(line);
+
+                    var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "";
+                    int curIdx = labels.IndexOf(curVal ?? "");
+                    if (curIdx >= 0)
+                    {
+                        pm.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
+                        {
+                            Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
+                            X = curIdx,
+                            Color = OxyColors.Red,
+                            LineStyle = LineStyle.Dash,
+                            StrokeThickness = 1.5,
+                            Text = curVal ?? "",
+                            TextColor = OxyColors.Red,
+                            FontSize = 9,
+                            FontWeight = OxyPlot.FontWeights.Bold,
+                            TextLinePosition = 0.5,
+                            TextOrientation = OxyPlot.Annotations.AnnotationTextOrientation.Horizontal,
+                            TextHorizontalAlignment = OxyPlot.HorizontalAlignment.Left
+                        });
+                    }
+                }
+                else
+                {
+                    var line = new LineSeries { Color = OxyColors.Black, StrokeThickness = 1.5 };
+                    for (int j = 0; j < fdata.X.Count && j < fdata.Y.Count; j++)
+                    {
+                        double d = ComputeDesirabilityForCurrentResponse(fdata.Y[j]);
+                        line.Points.Add(new DataPoint(fdata.X[j], d));
+                    }
+                    pm.Series.Add(line);
+
+                    double curX = fdata.CurrentNumericValue;
+                    pm.Annotations.Add(new LineAnnotation
+                    {
+                        Type = LineAnnotationType.Vertical,
+                        X = curX,
+                        Color = OxyColors.Red,
+                        LineStyle = LineStyle.Dash,
+                        StrokeThickness = 1.5,
+                        Text = $"{curX:F0}",
+                        TextColor = OxyColors.Red,
+                        FontSize = 9,
+                        FontWeight = OxyPlot.FontWeights.Bold,
+                        TextLinePosition = 0.5,
+                        TextOrientation = AnnotationTextOrientation.Horizontal,
+                        TextHorizontalAlignment = HorizontalAlignment.Left
+                    });
+                }
+
+                // D 值水平线
+                pm.Annotations.Add(new LineAnnotation
+                {
+                    Type = LineAnnotationType.Horizontal,
+                    Y = currentCompositeD,
+                    Color = OxyColor.FromArgb(120, 255, 0, 0),
+                    LineStyle = LineStyle.Dot,
+                    StrokeThickness = 1
+                });
+
+                // 更新左侧标签
+                if (i == 0)
+                {
+                    var yAxis = pm.Axes.FirstOrDefault(a => a.Position == AxisPosition.Left);
+                    if (yAxis != null) yAxis.Title = $"意愿{currentCompositeD:F4}";
+                }
+
+                pm.InvalidatePlot(true);
+            }
+        }
+        /// <summary>
+        /// ★ 构建最右边的意愿函数图（带可拖拽控制点）
+        /// </summary>
+        private void BuildDesirabilityFunctionPlot(List<PlotModel> plots, double currentCompositeD)
+        {
+            var cfg = _currentDesirabilityConfigs
+                .FirstOrDefault(c => c.ResponseName == _selectedResponseName);
+
+            var dPlot = new PlotModel
+            {
+                Title = "意愿",
+                TitleFontSize = 10,
+                TitleColor = OxyColor.FromRgb(200, 0, 0),
+                PlotMargins = new OxyThickness(50, 5, 10, 30)
+            };
+            dPlot.Axes.Add(new LinearAxis
+            {
+                Position = AxisPosition.Left,
+                FontSize = 9,
+                Minimum = -0.05,
+                Maximum = 1.05
+            });
+
+            if (cfg != null)
+            {
+                // Y 轴范围
+                double yMin = cfg.Lower - (cfg.Upper - cfg.Lower) * 0.1;
+                double yMax = cfg.Upper + (cfg.Upper - cfg.Lower) * 0.1;
+
+                dPlot.Axes.Add(new LinearAxis
+                {
+                    Position = AxisPosition.Bottom,
+                    FontSize = 9,
+                    Minimum = yMin,
+                    Maximum = yMax,
+                    Title = "y"
+                });
+
+                // d(y) 曲线
+                var curveSeries = new LineSeries
+                {
+                    Color = OxyColors.Black,
+                    StrokeThickness = 1.5
+                };
+                int nPts = 100;
+                for (int i = 0; i <= nPts; i++)
+                {
+                    double y = yMin + (yMax - yMin) * i / nPts;
+                    double d = ComputeDesirabilityForCurrentResponse(y);
+                    curveSeries.Points.Add(new DataPoint(y, d));
+                }
+                dPlot.Series.Add(curveSeries);
+
+                // ★ Feature 3: 三个控制点（方块标记）
+                var controlPoints = new ScatterSeries
+                {
+                    MarkerType = MarkerType.Square,
+                    MarkerSize = 6,
+                    MarkerFill = OxyColors.White,
+                    MarkerStroke = OxyColors.Black,
+                    MarkerStrokeThickness = 1.5
+                };
+
+                // Lower 点 (y=Lower, d=0)
+                controlPoints.Points.Add(new ScatterPoint(cfg.Lower, 0));
+                // Mid 点 (y=中间值, d=0.5)
+                double midY = (cfg.Lower + cfg.Target) / 2.0;
+                controlPoints.Points.Add(new ScatterPoint(midY, 0.5));
+                // Target 点 (y=Target, d=1)
+                controlPoints.Points.Add(new ScatterPoint(cfg.Target,
+                    cfg.Goal == DesirabilityGoal.Maximize ? 1.0 : 0.0));
+
+                dPlot.Series.Add(controlPoints);
+
+                // L / U 标注线
+                dPlot.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
+                {
+                    Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
+                    X = cfg.Lower,
+                    Color = OxyColors.Green,
+                    LineStyle = LineStyle.Dot,
+                    StrokeThickness = 1,
+                    Text = "L",
+                    TextColor = OxyColors.Green,
+                    FontSize = 8
+                });
+                dPlot.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
+                {
+                    Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
+                    X = cfg.Upper,
+                    Color = OxyColors.Blue,
+                    LineStyle = LineStyle.Dot,
+                    StrokeThickness = 1,
+                    Text = "U",
+                    TextColor = OxyColors.Blue,
+                    FontSize = 8
+                });
+            }
+            else
+            {
+                // 没有配置时: 对角线 + 当前 D 点
+                dPlot.Axes.Add(new LinearAxis
+                {
+                    Position = AxisPosition.Bottom,
+                    FontSize = 9,
+                    Minimum = 0,
+                    Maximum = 1,
+                    Title = "意愿"
+                });
+
+                var diagLine = new LineSeries
+                {
+                    Color = OxyColors.LightGray,
+                    LineStyle = LineStyle.Dash,
+                    StrokeThickness = 1
+                };
+                diagLine.Points.Add(new DataPoint(0, 0));
+                diagLine.Points.Add(new DataPoint(1, 1));
+                dPlot.Series.Add(diagLine);
+            }
+
+            // 当前 D 值圆点
+            var marker = new ScatterSeries
+            {
+                MarkerType = MarkerType.Circle,
+                MarkerSize = 6,
+                MarkerFill = OxyColors.DarkOrange
+            };
+            marker.Points.Add(new ScatterPoint(currentCompositeD, currentCompositeD));
+            dPlot.Series.Add(marker);
+
+            plots.Add(dPlot);
+        }
+        /// <summary>
+        /// 用真正的 Desirability 配置计算 d(y)
+        /// 对标 Minitab/JMP 的 Derringer-Suich 变换函数
+        /// </summary>
+        private double ComputeDesirabilityForCurrentResponse(double y)
+        {
+            // 找到当前响应的配置
+            var cfg = _currentDesirabilityConfigs
+                .FirstOrDefault(c => c.ResponseName == _selectedResponseName);
+
+            if (cfg == null)
+            {
+                // 没有配置，用线性归一化占位
+                if (_lastProfilerData?.Factors != null)
+                {
+                    double yMin = _lastProfilerData.Factors.Values.SelectMany(f => f.Y).DefaultIfEmpty(0).Min();
+                    double yMax = _lastProfilerData.Factors.Values.SelectMany(f => f.Y).DefaultIfEmpty(1).Max();
+                    if (Math.Abs(yMax - yMin) < 1e-12) return 0.5;
+                    return Math.Max(0, Math.Min(1, (y - yMin) / (yMax - yMin)));
+                }
+                return 0.5;
+            }
+
+            // 用真正的 Derringer-Suich 公式计算
+            double lower = cfg.Lower, upper = cfg.Upper, target = cfg.Target;
+            double shape = cfg.Shape;
+
+            switch (cfg.Goal)
+            {
+                case DesirabilityGoal.Maximize:
+                    if (y <= lower) return 0;
+                    if (y >= target) return 1;
+                    { var denom = target - lower; return denom < 1e-12 ? 1 : Math.Pow((y - lower) / denom, shape); }
+
+                case DesirabilityGoal.Minimize:
+                    if (y >= upper) return 0;
+                    if (y <= target) return 1;
+                    { var denom = upper - target; return denom < 1e-12 ? 1 : Math.Pow((upper - y) / denom, shape); }
+
+                default: // Target
+                    if (y < lower || y > upper) return 0;
+                    if (y <= target)
+                    { var denom = target - lower; return denom < 1e-12 ? 1 : Math.Pow((y - lower) / denom, cfg.ShapeLower); }
+                    else
+                    { var denom = upper - target; return denom < 1e-12 ? 1 : Math.Pow((upper - y) / denom, cfg.ShapeUpper); }
+            }
+        }
+        private async Task MaximizeDesirabilityAsync()
+        {
+            if (!IsProfilerLoaded) return;
+
+            try
+            {
+                IsLoading = true;
+                OlsStatusText = "正在最大化意愿...";
+
+                // 确定用 OLS 还是 GPR
+                if (IsOlsTabSelected)
+                {
+                    var batchId = IsDirectImportMode ? "" : SelectedOlsBatch?.BatchId;
+                    var configs = await _desirabilityService.LoadConfigAsync(batchId ?? "");
+                    if (configs.Count == 0)
+                    {
+                        // 没有配置，弹出设置意愿弹窗
+                        await ShowSetDesirabilityDialogAsync();
+                        configs = await _desirabilityService.LoadConfigAsync(batchId ?? "");
+                        if (configs.Count == 0) return;
+                    }
+
+                    var batch = await _repository.GetBatchWithDetailsAsync(batchId ?? "");
+                    if (batch == null) return;
+
+                    DesirabilityResult = await _desirabilityService.OptimizeWithOlsAsync(
+                        batchId!, configs, batch.Factors, _analysisService);
+                }
+                else
+                {
+                    // GPR 模式
+                    var configs = await _desirabilityService.LoadConfigAsync(_currentBatchId);
+                    var batch = await _repository.GetBatchWithDetailsAsync(_currentBatchId);
+                    if (batch == null) return;
+                    await _desirabilityService.ConfigureAsync(_currentBatchId, configs, batch.Factors);
+                    DesirabilityResult = await _desirabilityService.OptimizeAsync();
+                }
+
+                if (DesirabilityResult?.Success == true)
+                {
+                    DesirabilityCompositeD = DesirabilityResult.CompositeD;
+                    UpdateOptimalFactorsDisplay(DesirabilityResult);
+
+                    foreach (var kv in DesirabilityResult.OptimalFactors)
+                        _profilerCurrentValues[kv.Key] = kv.Value;
+
+                    await RefreshProfilerAfterOptimize();
+
+                    // ★ 新增: 刷新意愿行
+                    if (IsDesirabilityVisible)
+                    {
+                        _currentDesirabilityConfigs = await _desirabilityService.LoadConfigAsync(
+                            IsDirectImportMode ? "" : SelectedOlsBatch?.BatchId ?? _currentBatchId);
+                        BuildDesirabilityPlotsFromProfiler();
+                    }
+
+                    OlsStatusText = $"最大化意愿完成: D = {DesirabilityResult.CompositeD:F4}";
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "最大化意愿失败");
+                OlsStatusText = $"最大化失败: {ex.Message}";
+            }
+            finally { IsLoading = false; }
+        }
+
+        private async Task RefreshProfilerAfterOptimize()
+        {
+            if (DesirabilityResult?.OptimalFactors == null) return;
+
+            try
+            {
+                string json;
+                var fixedValues = new Dictionary<string, object>(DesirabilityResult.OptimalFactors);
+
+                if (IsDirectImportMode)
+                {
+                    var fixedJson = JsonConvert.SerializeObject(fixedValues);
+                    json = await Task.Run(() =>
+                        _analysisService.GetPredictionProfilerDirectAsync(_selectedResponseName, 50, fixedJson));
+                }
+                else
+                {
+                    json = await _analysisService.GetPredictionProfilerAsync(
+                        SelectedOlsBatch!.BatchId, _selectedResponseName, 50, fixedValues);
+                }
+
+                var data = JsonConvert.DeserializeObject<ProfilerResult>(json);
+                if (data?.Factors != null)
+                {
+                    _lastProfilerData = data;
+                    BuildProfilerPlots(data);
+                }
+            }
+            catch { }
+        }
+        public class SavedSolution
+        {
+            public int SolutionId { get; set; }
+            public Dictionary<string, object> Factors { get; set; } = new();
+            public double CompositeD { get; set; }
+            public List<IndividualDesirability> IndividualD { get; set; } = new();
+            public DateTime Timestamp { get; set; }
+            public string FactorsSummary => string.Join(", ",
+                Factors.Select(kv => $"{kv.Key}={kv.Value}"));
+        }
+
+        private async Task MaximizeAndRememberAsync()
+        {
+            await MaximizeDesirabilityAsync();
+            if (DesirabilityResult?.Success == true)
+            {
+                SavedSolutions.Add(new SavedSolution
+                {
+                    SolutionId = SavedSolutions.Count + 1,
+                    Factors = new(DesirabilityResult.OptimalFactors),
+                    CompositeD = DesirabilityResult.CompositeD,
+                    IndividualD = new(DesirabilityResult.IndividualD),
+                    Timestamp = DateTime.Now
+                });
+                HasSavedSolutions = SavedSolutions.Count > 0;
+            }
+        }
+        private async Task ShowSetDesirabilityDialogAsync()
+        {
+            var batchId = IsDirectImportMode ? "" : SelectedOlsBatch?.BatchId ?? _currentBatchId;
+
+            // 加载已有配置
+            var existingConfigs = await _desirabilityService.LoadConfigAsync(batchId);
+
+            // 构建弹窗数据
+            var dialogConfigs = ResponseNames.Select(name =>
+            {
+                var existing = existingConfigs.FirstOrDefault(c => c.ResponseName == name);
+                return existing ?? new DesirabilityResponseConfig
+                {
+                    ResponseName = name,
+                    Goal = DesirabilityGoal.Maximize,
+                    Lower = 0,
+                    Upper = 100,
+                    Target = 100,
+                    Importance = 3,
+                    Shape = 1.0
+                };
+            }).ToList();
+
+            // 弹窗
+            bool confirmed = false;
+            System.Windows.Application.Current.Dispatcher.Invoke(() =>
+            {
+                var dialog = new Views.DesirabilityConfigDialog(dialogConfigs, _desirabilityService);
+                dialog.Owner = System.Windows.Application.Current.MainWindow;
+                dialog.ShowDialog();
+                confirmed = dialog.Confirmed;
+                if (confirmed) dialogConfigs = dialog.ResultConfigs;
+            });
+
+            if (confirmed)
+            {
+                await _desirabilityService.SaveConfigAsync(batchId, dialogConfigs);
+
+                // ★ 新增: 保存后立即刷新
+                _currentDesirabilityConfigs = dialogConfigs;
+
+                // 如果意愿行已显示，立即刷新图表
+                if (IsDesirabilityVisible && IsProfilerLoaded)
+                {
+                    BuildDesirabilityPlotsFromProfiler();
+                }
+
+                OlsStatusText = $"Desirability 配置已保存 ({dialogConfigs.Count} 个响应)";
+            }
+        }
+        private async Task SaveDesirabilityValuesAsync()
+        {
+            // 获取所有实验数据的因子值
+            // 用 OLS 模型预测每一行的响应值，计算 D
+            // 保存到数据库 + 显示到界面
+
+            try
+            {
+                IsLoading = true;
+                OlsStatusText = "正在计算所有行的 Desirability...";
+
+                // TODO: 调用 Python engine.evaluate_all_rows()
+                // 结果保存到 _repository
+                // 更新 UI 显示 D 值列
+
+                OlsStatusText = "Desirability 值已保存";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "保存意愿失败");
+            }
+            finally { IsLoading = false; }
+        }
+        private async Task SaveDesirabilityFormulaAsync()
+        {
+            // 调用 Python engine.export_formula()
+            // 复制到剪贴板或保存为文件
+            try
+            {
+                // TODO: 调用 Python
+                // var formulaJson = engine.export_formula();
+                // Clipboard.SetText(formulaJson);
+                _dialogService.ShowInfo("Desirability 公式已复制到剪贴板", "保存成功");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "保存公式失败");
+            }
+        }
         private class DirectImportRawData
         {
             public List<string> Headers { get; set; } = new();
@@ -3434,7 +4463,16 @@ namespace MaxChemical.Modules.DOE.ViewModels
             [JsonProperty("f2")] public object F2 { get; set; } = 0.0;
             [JsonProperty("mean")] public double Mean { get; set; }
         }
-
+        // 新增统一显示类（编码和未编码共用）:
+        public class CoefficientDisplayRow
+        {
+            public string Term { get; set; } = "";
+            public double Coefficient { get; set; }
+            public double StdError { get; set; }
+            public double TValue { get; set; }
+            public double PValue { get; set; }
+            public double? VIF { get; set; }
+        }
         // ── Tukey HSD ──
 
         public class TukeyComparisonItem

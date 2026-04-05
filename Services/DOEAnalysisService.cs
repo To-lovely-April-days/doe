@@ -162,7 +162,11 @@ namespace MaxChemical.Modules.DOE.Services
                 result.UncodedCoefficients = pyResult.UncodedCoefficients.Select(c => new UncCodedCoefficientRow
                 {
                     Term = c.Term ?? "",
-                    Coefficient = c.Coeff
+                    Coefficient = c.Coeff,
+                    StdError = c.SE,
+                    TValue = c.TValue,
+                    PValue = c.PValue,
+                    VIF = c.VIF
                 }).ToList();
             }
 
@@ -834,6 +838,10 @@ namespace MaxChemical.Modules.DOE.Services
         {
             [JsonProperty("term")] public string? Term { get; set; }
             [JsonProperty("coeff")] public double Coeff { get; set; }
+            [JsonProperty("se")] public double SE { get; set; }
+            [JsonProperty("t_value")] public double TValue { get; set; }
+            [JsonProperty("p_value")] public double PValue { get; set; }
+            [JsonProperty("vif")] public double? VIF { get; set; }
         }
 
         private class PyModelSummary

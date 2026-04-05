@@ -234,20 +234,25 @@ class DOEDesigner:
         if alpha_type == "face":
             alpha = 1.0
         elif alpha_type == "orthogonal":
-            # 正交条件 — Montgomery (2017) "Design and Analysis of Experiments", Eq. 11.22:
-            #   α = { [n_f × (√N - √n_f)] / 2 }^(1/2)
-            #   其中 N = n_f + 2k + n₀ (总实验次数), n_f = 2^k (角点数)
-            #
-            # 正交设计使得 X'X 为对角矩阵，系数估计完全独立
-            n_a = 2 * k
-            N = n_f + n_a + center_count
-            alpha_sq = (n_f * (np.sqrt(N) - np.sqrt(n_f))) / 2.0
-            if alpha_sq > 0:
-                alpha = np.sqrt(alpha_sq)
+            # ★ FIX #5: 正交 alpha — 使用 Montgomery 9th Ed. Table 11.5 标准查表值
+            # 对于表中没有的 k，使用迭代法: α² = (1/2) × [√(N × n_f) - n_f]
+            _ortho_table = {2: (1.0, 5), 3: (1.2154, 6), 4: (1.4142, 7), 5: (1.5962, 10), 6: (1.7612, 15)}
+            if k in _ortho_table:
+                _alpha_tab, _n0_tab = _ortho_table[k]
+                if center_count < 0:
+                    center_count = _n0_tab
+                if center_count == _n0_tab:
+                    alpha = _alpha_tab
+                else:
+                    # 用户指定了不同 center_count，重新计算
+                    _N = n_f + 2 * k + center_count
+                    _alpha_sq = 0.5 * (np.sqrt(_N * n_f) - n_f)
+                    alpha = np.sqrt(max(_alpha_sq, 1.0))
             else:
-                alpha = 1.0  # 保底: 退化为面心设计
-            if alpha < 1.0:
-                alpha = 1.0  # 保底
+                _N = n_f + 2 * k + center_count
+                _alpha_sq = 0.5 * (np.sqrt(_N * n_f) - n_f)
+                alpha = np.sqrt(max(_alpha_sq, 1.0)) if _alpha_sq > 0 else 1.0
+            alpha = max(alpha, 1.0)  # 保底不小于 1
         else:  # rotatable（默认）
             alpha = n_f ** 0.25  # α = (2^k)^(1/4)
         
@@ -394,7 +399,7 @@ class DOEDesigner:
             
             candidates_coded = self._generate_candidate_grid(k_cont, 5)
             X_cand = self._build_model_matrix(candidates_coded, model_type)
-            best_idx = self._fedorov_exchange(X_cand, num_runs, n_starts=10)
+            best_idx = self._fedorov_exchange(X_cand, num_runs)  # n_starts 自动适配
             
             matrix = []
             for idx in best_idx:
@@ -491,7 +496,7 @@ class DOEDesigner:
             num_runs = X_cand.shape[0]
         
         # 7. Fedorov 选点
-        best_idx = self._fedorov_exchange(X_cand, num_runs, n_starts=10)
+        best_idx = self._fedorov_exchange(X_cand, num_runs)  # n_starts 自动适配
         
         # 8. 解码为实际因子值
         matrix = []
@@ -1072,7 +1077,7 @@ class DOEDesigner:
         
         return np.column_stack(columns) if columns else np.ones((n, 1))
 
-    def _fedorov_exchange(self, X_cand: np.ndarray, num_runs: int, n_starts: int = 10) -> list:
+    def _fedorov_exchange(self, X_cand: np.ndarray, num_runs: int, n_starts: int = None) -> list:
         """
         ★ 优化: Fedorov 坐标交换算法选择 D-最优子集
         
@@ -1304,6 +1309,70 @@ except ImportError:
 # ★ 改造: 新增 fit_ols() 完整 ANOVA 分析, residual_diagnostics() 残差四图
 # ═══════════════════════════════════════════════════════
 
+
+def _calc_adequate_precision_design_expert(model):
+    """
+    计算 Adequate Precision — 对标 Design-Expert 定义
+    
+    Design-Expert 公式 (参考 Stat-Ease documentation):
+        AP = (max(ŷ) - min(ŷ)) / sqrt( mean(Var(ŷ)) )
+    其中:
+        Var(ŷᵢ) = MSE × hᵢᵢ  (hat matrix 对角线)
+        mean(Var(ŷ)) = MSE × mean(hᵢᵢ) = MSE × p/n
+    简化: AP = (max(ŷ) - min(ŷ)) / sqrt(MSE × p/n)
+    
+    AP > 4 表示模型有足够信噪比用于导航设计空间。
+    """
+    try:
+        fitted = model.fittedvalues
+        fitted_arr = fitted.values if hasattr(fitted, 'values') else np.array(fitted)
+        ms_res = float(model.mse_resid)
+        if ms_res < 1e-12:
+            return 0.0
+        y_range = float(fitted_arr.max() - fitted_arr.min())
+        if y_range < 1e-12:
+            return 0.0
+        n = len(fitted_arr)
+        p = len(model.params)
+        mean_var_pred = ms_res * p / n
+        return float(y_range / np.sqrt(mean_var_pred))
+    except Exception:
+        return 0.0
+
+
+def _calc_vif_correct(model):
+    """
+    计算 VIF — 标准方法（去掉截距列后逐列回归）
+    VIF_j = 1 / (1 - R²_j)，其中 R²_j 是第 j 列对其余列回归的 R²
+    """
+    try:
+        from statsmodels.stats.outliers_influence import variance_inflation_factor
+        X = model.model.exog
+        param_names = list(model.params.index)
+        intercept_idx = None
+        for i, name in enumerate(param_names):
+            if name == "Intercept":
+                intercept_idx = i
+                break
+        if intercept_idx is not None:
+            X_no_intercept = np.delete(X, intercept_idx, axis=1)
+            names_no_intercept = [n for i, n in enumerate(param_names) if i != intercept_idx]
+        else:
+            X_no_intercept = X
+            names_no_intercept = param_names
+        vif_dict = {}
+        import statsmodels.api as _sm
+        for j in range(X_no_intercept.shape[1]):
+            try:
+                X_with_const = _sm.add_constant(X_no_intercept)
+                vif_val = variance_inflation_factor(X_with_const, j + 1)
+                vif_dict[names_no_intercept[j]] = round(float(vif_val), 4)
+            except Exception:
+                vif_dict[names_no_intercept[j]] = None
+        return vif_dict
+    except Exception:
+        return {}
+
 class DOEAnalyzer:
     """
     DOE 统计分析器 — 主效应、交互效应、Pareto、ANOVA、回归、残差分析。
@@ -1480,6 +1549,7 @@ class DOEAnalyzer:
                 model = ols(formula, data=df_safe).fit()
 
             self._model = model
+            self._model_treatment = model  # ★ FIX #4: 保存 Treatment coding 模型供方程展开
 
             # ────── 系数表 (★ v13: 使用 Sum coding, 对标 Minitab "已编码系数") ──────
             # Minitab 的 "已编码系数" 表用 Sum/Effect coding (-1,0,1)
@@ -1498,21 +1568,16 @@ class DOEAnalyzer:
                 model_sum_coeff = model  # 回退到 Treatment coding
             
             coefficients = []
-            X_matrix = model_sum_coeff.model.exog
-            try:
-                XtX = X_matrix.T @ X_matrix
-                XtX_inv = np.linalg.inv(XtX)
-            except Exception:
-                XtX_inv = None
+            # ★ FIX #3: 使用标准 VIF 计算（去掉截距列后逐列回归）
+            vif_dict = _calc_vif_correct(model_sum_coeff)
 
             for idx_j, term in enumerate(model_sum_coeff.params.index):
                 coeff = float(model_sum_coeff.params[term])
                 se = float(model_sum_coeff.bse[term])
                 t_val = float(model_sum_coeff.tvalues[term])
                 p_val = float(model_sum_coeff.pvalues[term])
-                vif = None
-                if XtX_inv is not None and idx_j > 0:
-                    vif = round(float(XtX_inv[idx_j, idx_j] * XtX[idx_j, idx_j]), 4)
+                # ★ FIX #3: 从标准 VIF 字典获取
+                vif = vif_dict.get(term) if idx_j > 0 else None
                 # 去掉 Sum coding 标记再还原名称
                 display_term = self._restore_term_name(term.replace(", Sum", ""), reverse_names)
                 coefficients.append({
@@ -1534,14 +1599,9 @@ class DOEAnalyzer:
             p_count = len(model.params)
             ms_res = float(model.mse_resid)
             adeq_prec = 0.0
-            if ms_res > 1e-12:
-                # ★ 修复: Adequate Precision 对标 Design-Expert / Minitab
-                # signal = sqrt( (1/p) × Σ(ŷᵢ - ȳ)² ), AP = signal / sqrt(MSE)
-                fitted_arr = fitted.values if hasattr(fitted, 'values') else np.array(fitted)
-                y_bar = float(fitted_arr.mean())
-                signal_sq = float(np.mean((fitted_arr - y_bar) ** 2))
-                if signal_sq > 1e-12:
-                    adeq_prec = float(np.sqrt(signal_sq) / np.sqrt(ms_res))
+            # ★ FIX #2: Adequate Precision 对标 Design-Expert 标准公式
+            # AP = (max(ŷ) - min(ŷ)) / sqrt(MSE × p/n)
+            adeq_prec = _calc_adequate_precision_design_expert(model)
 
             lof_p = self._calc_lack_of_fit_p(model, df_safe, safe_names, model_type)
             equation = self._build_equation(model, reverse_names)
@@ -1600,13 +1660,23 @@ class DOEAnalyzer:
                     )
                 model_uncoded = ols(uncoded_formula, data=df_uncoded).fit()
 
-                # 提取系数
-                for term in model_uncoded.params.index:
+                # ★ v14 改进: 提取完整系数表（含 SE/T/P/VIF），对标 Minitab 未编码系数表
+                # 这样 C# 端切换到"未编码单位"时，系数表也能完整显示
+                uncoded_vif_dict = _calc_vif_correct(model_uncoded)
+                for idx_j, term in enumerate(model_uncoded.params.index):
                     coeff_val = float(model_uncoded.params[term])
+                    se_val = float(model_uncoded.bse[term])
+                    t_val = float(model_uncoded.tvalues[term])
+                    p_val = float(model_uncoded.pvalues[term])
+                    vif_val = uncoded_vif_dict.get(term) if idx_j > 0 else None
                     display_term = self._restore_term_name(term, reverse_names)
                     uncoded_coefficients.append({
                         "term": display_term,
-                        "coeff": round(coeff_val, 6)
+                        "coeff": round(coeff_val, 6),
+                        "se": round(se_val, 6),
+                        "t_value": round(t_val, 4),
+                        "p_value": round(p_val, 6),
+                        "vif": vif_val
                     })
 
                 # 构建未编码方程
@@ -2914,11 +2984,25 @@ class DOEAnalyzer:
                 y_new = (y ** lambda_value - 1) / lambda_value
                 transform_desc = f"y^{lambda_value:.2f}"
 
-            # ★ 修复: 保存原始数据备份（如果还没有），供后续恢复
-            if not hasattr(self, '_df_full_backup') or self._df_full_backup is None:
-                self._df_full_backup = self._df.copy()
+            # ★ FIX #8: 使用不可覆盖的原始备份
+            # 首次调用保存原始数据；后续调用从原始备份恢复再变换
+            if not hasattr(self, '_df_original_backup') or self._df_original_backup is None:
+                self._df_original_backup = self._df.copy()
+            else:
+                # 从原始备份恢复（避免连续变换导致备份被覆盖）
+                self._df = self._df_original_backup.copy()
+                y_new_recalc = self._df[self._response_name].astype(float).values
+                if abs(lambda_value) < 1e-10:
+                    y_new = np.log(y_new_recalc)
+                elif abs(lambda_value - 1.0) < 1e-10:
+                    y_new = y_new_recalc
+                else:
+                    y_new = (y_new_recalc ** lambda_value - 1) / lambda_value
             
-            # 应用变换 — _df 和 _model 同步更新
+            # 同时设置旧的 _df_full_backup（兼容 restore_full_data_from_backup）
+            self._df_full_backup = self._df_original_backup.copy()
+            
+            # 应用变换
             self._df[self._response_name] = y_new
             result_json = self.fit_ols(model_type)
             result = json.loads(result_json)
@@ -2985,13 +3069,8 @@ class DOEAnalyzer:
             r2_pred = 1.0 - press / ss_total if ss_total > 1e-12 else 0.0
             fitted = model.fittedvalues
             adeq_prec = 0.0
-            if ms_res > 1e-12:
-                # ★ 修复: Adequate Precision 对标 Design-Expert / Minitab
-                fitted_arr = fitted.values if hasattr(fitted, 'values') else np.array(fitted)
-                y_bar_fit = float(fitted_arr.mean())
-                signal_sq = float(np.mean((fitted_arr - y_bar_fit) ** 2))
-                if signal_sq > 1e-12:
-                    adeq_prec = float(np.sqrt(signal_sq) / np.sqrt(ms_res))
+            # ★ FIX #2: Adequate Precision 对标 Design-Expert
+            adeq_prec = _calc_adequate_precision_design_expert(model)
 
             # ════════════════════════════════════════════
             # 1. 标题页
@@ -3953,16 +4032,14 @@ class DOEAnalyzer:
         return "Y ~ " + " + ".join(sorted(formula_terms))
 
     def _build_anova_table(self, model, df_safe, safe_names, reverse_names, model_type) -> list:
-        """★ v12 重写: 构建完整 ANOVA 表 — 使用 Type II SS 对标 Minitab Adj SS
+        """★ v14 重写: 构建完整 ANOVA 表 — 使用 Sum coding + Type III SS 对标 Minitab Adj SS
         
-        Minitab 的 Adj SS = statsmodels Type II SS:
-          遵循"边际性原则"(marginality): 测试主效应时，只在不包含该因子高阶项
-          的模型中比较。这确保了主效应的 SS 反映其真实贡献，不被高阶项吸收。
+        Minitab 的 Adj SS = Sum coding + Type III SS:
+          Sum coding (Effect coding) 使类别因子系数表示偏离总均值的效应，
+          结合连续因子编码到 [-1, +1]，Type III SS 与 Minitab Adj SS 完全一致。
           
-        与 Type III 的区别:
-          Type III 测试主效应时保留所有高阶项（包括含该因子的交互和二次项），
-          导致连续因子主效应 SS 偏小（被高阶项吸收了线性信息）。
-          Type II 遵循边际性，与 Minitab/Design-Expert 一致。
+        注意: 不是 Type II SS。Minitab 的 Adj SS 是 Type III（调整后平方和），
+          不是遵循边际性原则的 Type II。两者在不平衡数据时有差异。
         
         分组汇总行使用缩减模型法计算（去掉整组后的 SS 增量）。
         
@@ -4018,7 +4095,7 @@ class DOEAnalyzer:
                 except Exception:
                     model_anova = model
             
-            # Type III SS（与 Sum coding 配合 = Minitab Adj SS）
+            # ★ Sum coding + Type III SS = Minitab Adj SS（注意: 这是 Type III 而非 Type II）
             anova_result = anova_lm(model_anova, typ=3)
             
             # 构建各项的分组归类

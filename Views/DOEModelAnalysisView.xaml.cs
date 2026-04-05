@@ -1,4 +1,5 @@
-﻿using MaxChemical.Modules.DOE.ViewModels;
+﻿using MaxChemical.Modules.DOE.Models;
+using MaxChemical.Modules.DOE.ViewModels;
 using OxyPlot;
 using OxyPlot.Axes;
 using OxyPlot.Series;
@@ -7,6 +8,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 
 namespace MaxChemical.Modules.DOE.Views
 {
@@ -16,9 +18,15 @@ namespace MaxChemical.Modules.DOE.Views
         private string? _draggingFactorName;
         private OxyPlot.Wpf.PlotView? _draggingPlotView;
         private bool _draggingIsCategorical;
-
+        // ── 意愿行拖拽状态 ──
+        private bool _isDraggingDesirability;
+        private string? _draggingDesirabilityFactorName;
+        private OxyPlot.Wpf.PlotView? _draggingDesirabilityPlotView;
         public DOEModelAnalysisView() { InitializeComponent(); }
-
+        // ── 意愿图控制点拖拽状态 ──
+        private bool _isDraggingControlPoint;
+        private int _draggingControlPointIndex = -1; // 0=Lower, 1=Mid, 2=Target
+        private OxyPlot.Wpf.PlotView? _controlPointPlotView;
         private void GprTab_Click(object sender, MouseButtonEventArgs e)
         { if (DataContext is DOEModelAnalysisViewModel vm) vm.SwitchToGprTabCommand.Execute(); }
         private void OlsTab_Click(object sender, MouseButtonEventArgs e)
@@ -242,6 +250,266 @@ namespace MaxChemical.Modules.DOE.Views
             {
                 vm.IsCodedEquation = !vm.IsCodedEquation;
             }
+        }
+        private void DesirabilityMenu_Click(object sender, RoutedEventArgs e)
+        {
+            var menu = new ContextMenu();
+            var vm = DataContext as DOEModelAnalysisViewModel;
+            if (vm == null) return;
+
+            var item1 = new MenuItem { Header = "意愿函数", IsCheckable = true, IsChecked = vm.IsDesirabilityVisible };
+            item1.Click += (s, _) => vm.ToggleDesirabilityCommand.Execute();
+            menu.Items.Add(item1);
+
+            menu.Items.Add(new Separator());
+
+            var item2 = new MenuItem { Header = "最大化意愿" };
+            item2.Click += (s, _) => vm.MaximizeDesirabilityCommand.Execute();
+            menu.Items.Add(item2);
+
+            var item3 = new MenuItem { Header = "最大化并记住" };
+            item3.Click += (s, _) => vm.MaximizeAndRememberCommand.Execute();
+            menu.Items.Add(item3);
+
+            menu.Items.Add(new Separator());
+
+            var item6 = new MenuItem { Header = "保存意愿" };
+            item6.Click += (s, _) => vm.SaveDesirabilityCommand.Execute();
+            menu.Items.Add(item6);
+
+            var item7 = new MenuItem { Header = "设置意愿..." };
+            item7.Click += (s, _) => vm.SetDesirabilityCommand.Execute();
+            menu.Items.Add(item7);
+
+            var item8 = new MenuItem { Header = "保存意愿公式" };
+            item8.Click += (s, _) => vm.SaveDesirabilityFormulaCommand.Execute();
+            menu.Items.Add(item8);
+
+            menu.IsOpen = true;
+        }
+
+        /// <summary>
+        /// ★ Feature 2: 意愿行鼠标按下 — 判断是否点击了红色竖线附近
+        /// </summary>
+        private void DesirabilityProfiler_MouseDown(object sender, MouseButtonEventArgs e)
+        {
+            if (DataContext is not DOEModelAnalysisViewModel vm) return;
+            if (sender is not OxyPlot.Wpf.PlotView plotView) return;
+
+            var parent = FindParentItemsControl(plotView);
+            if (parent == null) return;
+            int index = FindPlotViewIndex(parent, plotView);
+            if (index < 0) return;
+
+            var factorName = vm.GetDesirabilityFactorName(index);
+
+            // ★ Feature 3: 最后一个图是意愿图，双击弹出设置弹窗
+            if (factorName == null)
+            {
+                if (e.ClickCount == 2)
+                {
+                    vm.SetDesirabilityCommand.Execute();
+                }
+                return;
+            }
+
+            // 检查是否为类别因子
+            bool isCat = vm.IsProfilerFactorCategorical(factorName);
+            if (isCat)
+            {
+                // 类别因子: 点击切换水平（跟响应行一样）
+                var levels = vm.GetProfilerCategoryLevels(factorName);
+                if (levels != null && levels.Count > 0)
+                {
+                    var rawX = GetRawDataX(plotView, e);
+                    if (rawX.HasValue)
+                    {
+                        int idx = Math.Max(0, Math.Min(levels.Count - 1, (int)Math.Round(rawX.Value)));
+                        _ = vm.UpdateProfilerCategoryAsync(factorName, levels[idx]);
+                    }
+                }
+                return;
+             
+            }
+
+            // 连续因子: 开始拖拽
+            _isDraggingDesirability = true;
+            _draggingDesirabilityFactorName = factorName;
+            _draggingDesirabilityPlotView = plotView;
+            plotView.CaptureMouse();
+            e.Handled = true;
+        }
+
+        private void DesirabilityProfiler_MouseMove(object sender, MouseEventArgs e)
+        {
+            if (!_isDraggingDesirability || _draggingDesirabilityFactorName == null) return;
+            if (_draggingDesirabilityPlotView == null) return;
+            if (DataContext is not DOEModelAnalysisViewModel vm) return;
+
+            var position = e.GetPosition(_draggingDesirabilityPlotView);
+            var plotModel = _draggingDesirabilityPlotView.Model;
+            if (plotModel == null) return;
+
+            var xAxis = plotModel.Axes.FirstOrDefault(a => a.Position == OxyPlot.Axes.AxisPosition.Bottom);
+            if (xAxis == null) return;
+
+            double newX = xAxis.InverseTransform(position.X);
+            var (min, max) = vm.GetProfilerFactorRange(_draggingDesirabilityFactorName);
+            newX = Math.Max(min, Math.Min(max, newX));
+
+            // ★ 移动红线 + 更新文字
+            var vline = plotModel.Annotations
+                .OfType<OxyPlot.Annotations.LineAnnotation>()
+                .FirstOrDefault(a => a.Type == OxyPlot.Annotations.LineAnnotationType.Vertical
+                                     && a.Color == OxyColors.Red);
+            if (vline != null)
+            {
+                vline.X = newX;
+            }
+
+            // ★ 更新 X 轴 Title（需要用 true 触发完整重绘）
+            xAxis.Title = $"{newX:F2}";
+
+            plotModel.InvalidatePlot(true);
+        }
+
+
+        private async void DesirabilityProfiler_MouseUp(object sender, MouseButtonEventArgs e)
+        {
+            if (!_isDraggingDesirability) return;
+            if (DataContext is not DOEModelAnalysisViewModel vm) return;
+
+            var factorName = _draggingDesirabilityFactorName!;
+            var plotView = _draggingDesirabilityPlotView!;
+
+            plotView.ReleaseMouseCapture();
+            _isDraggingDesirability = false;
+            _draggingDesirabilityFactorName = null;
+            _draggingDesirabilityPlotView = null;
+
+            // ★ 松开时才调用 Python 更新
+            var rawX = GetRawDataX(plotView, e);
+            if (!rawX.HasValue) return;
+
+            var (min, max) = vm.GetProfilerFactorRange(factorName);
+            double newX = Math.Max(min, Math.Min(max, rawX.Value));
+
+            await vm.UpdateProfilerValueAsync(factorName, newX);
+        }
+
+        /// <summary>
+        /// 找到 PlotView 所在的 ItemsControl
+        /// </summary>
+        private ItemsControl? FindParentItemsControl(DependencyObject child)
+        {
+            var parent = VisualTreeHelper.GetParent(child);
+            while (parent != null)
+            {
+                if (parent is ItemsControl ic && ic != ProfilerItemsControl)
+                    return ic;
+                parent = VisualTreeHelper.GetParent(parent);
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 找到 PlotView 在 ItemsControl 中的索引
+        /// </summary>
+        private int FindPlotViewIndex(ItemsControl itemsControl, OxyPlot.Wpf.PlotView plotView)
+        {
+            for (int i = 0; i < itemsControl.Items.Count; i++)
+            {
+                var container = itemsControl.ItemContainerGenerator.ContainerFromIndex(i) as ContentPresenter;
+                if (container != null)
+                {
+                    var pv = FindChild<OxyPlot.Wpf.PlotView>(container);
+                    if (pv == plotView) return i;
+                }
+            }
+            return -1;
+        }
+
+        private static T? FindChild<T>(DependencyObject parent) where T : DependencyObject
+        {
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+            {
+                var child = VisualTreeHelper.GetChild(parent, i);
+                if (child is T t) return t;
+                var result = FindChild<T>(child);
+                if (result != null) return result;
+            }
+            return null;
+        }
+
+        private void HandleDesirabilityFunctionMouseDown(DOEModelAnalysisViewModel vm,
+    OxyPlot.Wpf.PlotView plotView, MouseButtonEventArgs e)
+        {
+            var position = e.GetPosition(plotView);
+            var plotModel = plotView.Model;
+            if (plotModel == null) return;
+
+            var xAxis = plotModel.Axes.FirstOrDefault(a => a.Position == AxisPosition.Bottom);
+            var yAxis = plotModel.Axes.FirstOrDefault(a => a.Position == AxisPosition.Left);
+            if (xAxis == null || yAxis == null) return;
+
+            // 检查鼠标是否在控制点附近（20像素容差）
+            var cfg = vm.GetCurrentDesirabilityConfig();
+            if (cfg == null) return;
+
+            double[][] controlPts = new[]
+            {
+        new[] { cfg.Lower, 0.0 },
+        new[] { (cfg.Lower + cfg.Target) / 2.0, 0.5 },
+        new[] { cfg.Target, cfg.Goal == DesirabilityGoal.Maximize ? 1.0 : 0.0 }
+    };
+
+            for (int i = 0; i < controlPts.Length; i++)
+            {
+                var screenPt = xAxis.Transform(controlPts[i][0], controlPts[i][1], yAxis);
+                double dist = Math.Sqrt(Math.Pow(position.X - screenPt.X, 2) + Math.Pow(position.Y - screenPt.Y, 2));
+                if (dist < 20)
+                {
+                    _isDraggingControlPoint = true;
+                    _draggingControlPointIndex = i;
+                    _controlPointPlotView = plotView;
+                    plotView.CaptureMouse();
+                    e.Handled = true;
+                    return;
+                }
+            }
+        }
+
+        private void HandleDesirabilityFunctionMouseMove(DOEModelAnalysisViewModel vm, MouseEventArgs e)
+        {
+            if (!_isDraggingControlPoint || _controlPointPlotView == null) return;
+
+            var position = e.GetPosition(_controlPointPlotView);
+            var plotModel = _controlPointPlotView.Model;
+            if (plotModel == null) return;
+
+            var xAxis = plotModel.Axes.FirstOrDefault(a => a.Position == AxisPosition.Bottom);
+            if (xAxis == null) return;
+
+            // 计算新的 Y 值（响应值）
+            double newY = xAxis.InverseTransform(position.X);
+
+            // 根据拖拽的是哪个点，更新配置
+            switch (_draggingControlPointIndex)
+            {
+                case 0: // Lower
+                    vm.UpdateDesirabilityLower(newY);
+                    break;
+                case 1: // Mid（调整 shape 参数）
+                    vm.UpdateDesirabilityMidPoint(newY);
+                    break;
+                case 2: // Target
+                    vm.UpdateDesirabilityTarget(newY);
+                    break;
+            }
+
+            // 刷新意愿图和意愿行
+            vm.RefreshDesirabilityFunctionPlot();
+            vm.RefreshDesirabilityPlotsInPlace();
         }
     }
 

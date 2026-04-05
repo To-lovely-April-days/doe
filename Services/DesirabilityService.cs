@@ -30,7 +30,7 @@ namespace MaxChemical.Modules.DOE.Services
         private readonly ILogService _logger;
         private dynamic? _pythonEngine;
         private bool _isPythonInitialized;
-
+        private dynamic? _olsPredictor;
         // 当前配置缓存
         private List<DesirabilityResponseConfig> _currentConfigs = new();
         private List<DOEFactor> _currentFactors = new();
@@ -340,7 +340,180 @@ namespace MaxChemical.Modules.DOE.Services
             return JsonConvert.DeserializeObject<List<DesirabilityResponseConfig>>(configJson)
                    ?? new List<DesirabilityResponseConfig>();
         }
+        /// <summary>
+        /// ★ v2 新增: 基于 OLS 模型的多响应 Desirability 优化
+        /// 对标 Minitab Response Optimizer
+        /// </summary>
+        public async Task<DesirabilityResult> OptimizeWithOlsAsync(
+            string batchId,
+            List<DesirabilityResponseConfig> configs,
+            List<DOEFactor> factors,
+            IDOEAnalysisService analysisService)
+        {
+            EnsurePythonReady();
 
+            _currentConfigs = configs;
+            _currentFactors = factors;
+
+            try
+            {
+                using (Py.GIL())
+                {
+                    // 1. 创建 OLS 多响应预测器
+                    dynamic doeDesirability = Py.Import("doe_desirability");
+                    _olsPredictor = doeDesirability.create_ols_predictor();
+
+                    // 2. 为每个响应变量创建独立的 DOEAnalyzer 并拟合 OLS 模型
+                    dynamic doeEngine = Py.Import("doe_engine");
+
+                    var batch = await _repository.GetBatchWithDetailsAsync(batchId);
+                    if (batch == null)
+                        return new DesirabilityResult { Success = false, ErrorMessage = "未找到批次" };
+
+                    var completedRuns = batch.Runs
+                        .Where(r => r.Status == DOERunStatus.Completed)
+                        .OrderBy(r => r.RunIndex)
+                        .ToList();
+
+                    if (completedRuns.Count == 0)
+                        return new DesirabilityResult { Success = false, ErrorMessage = "无已完成实验数据" };
+
+                    // 解析因子值
+                    var factorsList = completedRuns
+                        .Select(r => JsonConvert.DeserializeObject<Dictionary<string, object>>(r.FactorValuesJson))
+                        .Where(f => f != null)
+                        .ToList();
+
+                    var factorsJsonArray = JsonConvert.SerializeObject(factorsList);
+
+                    // 因子类型 JSON
+                    var factorTypes = new Dictionary<string, string>();
+                    foreach (var f in factors)
+                        factorTypes[f.FactorName] = f.IsCategorical ? "categorical" : "continuous";
+                    var factorTypesJson = JsonConvert.SerializeObject(factorTypes);
+
+                    // 为每个响应变量创建独立的 analyzer
+                    foreach (var cfg in configs)
+                    {
+                        var responseName = cfg.ResponseName;
+
+                        // 提取该响应的值
+                        var responseValues = completedRuns
+                            .Select(r =>
+                            {
+                                var respDict = JsonConvert.DeserializeObject<Dictionary<string, double>>(
+                                    r.ResponseValuesJson ?? "{}");
+                                return respDict?.GetValueOrDefault(responseName, 0.0) ?? 0.0;
+                            })
+                            .ToList();
+
+                        var responsesJson = JsonConvert.SerializeObject(responseValues);
+
+                        // 创建独立的 analyzer 并拟合
+                        dynamic analyzer = doeEngine.create_analyzer();
+                        analyzer.load_data(factorsJsonArray, responsesJson, responseName, factorTypesJson);
+                        analyzer.fit_ols("quadratic");
+
+                        // 注册到预测器
+                        _olsPredictor.add_response(responseName, analyzer);
+
+                        _logger.LogInformation("OLS Desirability: 响应 '{Name}' 模型已拟合", responseName);
+                    }
+
+                    // 3. 配置 DesirabilityEngine
+                    var configsList = configs.Select(c => new
+                    {
+                        name = c.ResponseName,
+                        goal = c.Goal.ToString().ToLower(),
+                        lower = c.Lower,
+                        upper = c.Upper,
+                        target = c.Target,
+                        weight = c.Weight,
+                        importance = c.Importance,
+                        shape = c.Shape,
+                        shape_lower = c.ShapeLower,
+                        shape_upper = c.ShapeUpper
+                    }).ToList();
+
+                    var factorNames = factors.Select(f => f.FactorName).ToList();
+                    var boundsDict = new Dictionary<string, object>();
+                    foreach (var f in factors)
+                    {
+                        if (f.IsCategorical)
+                            boundsDict[f.FactorName] = f.CategoryLevels?.Split(',').Select(s => s.Trim()).ToList()
+                                                       ?? new List<string>();
+                        else
+                            boundsDict[f.FactorName] = new[] { f.LowerBound, f.UpperBound };
+                    }
+
+                    _pythonEngine!.configure(
+                        JsonConvert.SerializeObject(configsList),
+                        JsonConvert.SerializeObject(factorNames),
+                        JsonConvert.SerializeObject(boundsDict)
+                    );
+
+                    // 4. 用 OLS 预测器的 predict_json 方法做优化
+                    // ★ 关键: 这里传 _olsPredictor.predict_json 而非 GPR 的预测
+                    string resultJson = _pythonEngine!.optimize(_olsPredictor.predict_json).ToString();
+
+                    var pyResult = JsonConvert.DeserializeObject<PyOptimizeResult>(resultJson)!;
+
+                    var result = new DesirabilityResult
+                    {
+                        OptimalFactors = pyResult.OptimalFactors ?? new(),
+                        CompositeD = pyResult.CompositeD,
+                        Success = pyResult.Success,
+                        ErrorMessage = pyResult.Error,
+                        IndividualD = new()
+                    };
+
+                    if (pyResult.IndividualD != null)
+                    {
+                        foreach (var kv in pyResult.IndividualD)
+                        {
+                            var config = configs.FirstOrDefault(c => c.ResponseName == kv.Key);
+                            result.IndividualD.Add(new IndividualDesirability
+                            {
+                                ResponseName = kv.Key,
+                                PredictedValue = kv.Value.Value,
+                                D = kv.Value.D,
+                                Goal = config?.Goal ?? DesirabilityGoal.Maximize
+                            });
+                        }
+                    }
+
+                    _logger.LogInformation("OLS Desirability 优化完成: D={D}, 成功={Success}",
+                        result.CompositeD, result.Success);
+                    return result;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "OLS Desirability 优化失败");
+                return new DesirabilityResult
+                {
+                    Success = false,
+                    ErrorMessage = $"OLS 优化失败: {ex.Message}"
+                };
+            }
+        }
+
+        /// <summary>
+        /// ★ v2 新增: 获取 OLS 模式的 Profile 图数据
+        /// </summary>
+        public Task<string> GetOlsProfileDataAsync(int gridSize = 50)
+        {
+            EnsurePythonReady();
+
+            if (_olsPredictor == null)
+                return Task.FromResult(JsonConvert.SerializeObject(new { error = "OLS 预测器未初始化，请先运行优化" }));
+
+            using (Py.GIL())
+            {
+                string resultJson = _pythonEngine!.profile_plot_data(_olsPredictor.predict_json, gridSize).ToString();
+                return Task.FromResult(resultJson);
+            }
+        }
         // ── Python 结果反序列化类 ──
 
         private class PyDesirabilityResult

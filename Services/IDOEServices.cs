@@ -306,6 +306,14 @@ namespace MaxChemical.Modules.DOE.Services
         Task<string> GetProfileDataAsync(int gridSize = 50);
         Task SaveConfigAsync(string batchId, List<DesirabilityResponseConfig> configs);
         Task<List<DesirabilityResponseConfig>> LoadConfigAsync(string batchId);
+
+        // ★ v2 新增: OLS 模式
+        Task<DesirabilityResult> OptimizeWithOlsAsync(
+            string batchId,
+            List<DesirabilityResponseConfig> configs,
+            List<DOEFactor> factors,
+            IDOEAnalysisService analysisService);
+        Task<string> GetOlsProfileDataAsync(int gridSize = 50);
     }
 
     // ═══════════════════════════════════════════════════════

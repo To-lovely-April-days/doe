@@ -93,16 +93,20 @@ namespace MaxChemical.Modules.DOE.Models
         public double? VIF { get; set; }
     }
 
+    // 新代码:
     /// <summary>
-    /// ★ v13 新增: 未编码（原始值）系数行
-    /// 只有 term 和 coeff，没有 SE/T/P/VIF（这些在编码系数表中查看）
+    /// ★ v14 改进: 未编码系数行 — 现在包含完整的 SE/T/P/VIF
+    /// 切换到"未编码单位"时，系数表可以显示完整统计量
     /// </summary>
     public class UncCodedCoefficientRow
     {
         public string Term { get; set; } = string.Empty;
         public double Coefficient { get; set; }
+        public double StdError { get; set; }
+        public double TValue { get; set; }
+        public double PValue { get; set; }
+        public double? VIF { get; set; }
     }
-
     /// <summary>
     /// ★ v13 新增: 因子编码信息
     /// </summary>

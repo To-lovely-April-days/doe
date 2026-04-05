@@ -663,7 +663,7 @@
                             <Border Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
                                 <TextBlock Text="回归系数表" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36"/>
                             </Border>
-                            <DataGrid ItemsSource="{Binding OlsResult.Coefficients}" AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="Horizontal" BorderThickness="0" CanUserAddRows="False" MaxHeight="300">
+                            <DataGrid ItemsSource="{Binding DisplayCoefficients}" AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="Horizontal" BorderThickness="0" CanUserAddRows="False" MaxHeight="300">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="项" Binding="{Binding Term}" Width="120"/>
                                     <DataGridTextColumn Header="系数 β" Binding="{Binding Coefficient, StringFormat={}{0:F6}}" Width="100"/>
@@ -897,14 +897,30 @@
                                 <DockPanel>
                                     <TextBlock Text="预测刻画器 &amp; 最优化" FontSize="12" FontWeight="SemiBold" Foreground="#2E7D32" VerticalAlignment="Center"/>
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" DockPanel.Dock="Right">
+                                        <!-- ★ JMP 风格: 优化和意愿 下拉菜单 -->
+                                        <Button x:Name="DesirabilityMenuBtn" Content="优化和意愿 ▼" 
+                    Padding="10,4" FontSize="11" Background="#FFF8E1" BorderBrush="#FFE082" Cursor="Hand" Margin="0,0,6,0"
+                    Click="DesirabilityMenu_Click"/>
+
                                         <Button Content="生成刻画器" Command="{Binding LoadProfilerCommand}" 
-                                                Padding="10,4" FontSize="11" Background="#E8F5E9" BorderBrush="#66BB6A" Cursor="Hand" Margin="0,0,6,0"/>
+                    Padding="10,4" FontSize="11" Background="#E8F5E9" BorderBrush="#66BB6A" Cursor="Hand" Margin="0,0,6,0"/>
                                         <Button Content="求最大值" Command="{Binding FindOptimalMaxCommand}" 
-                                                Padding="10,4" FontSize="11" Background="#FFF3E0" BorderBrush="#FFA726" Cursor="Hand" Margin="0,0,6,0"/>
+                    Padding="10,4" FontSize="11" Background="#FFF3E0" BorderBrush="#FFA726" Cursor="Hand" Margin="0,0,6,0"/>
                                         <Button Content="求最小值" Command="{Binding FindOptimalMinCommand}" 
-                                                Padding="10,4" FontSize="11" Background="#E3F2FD" BorderBrush="#42A5F5" Cursor="Hand"/>
+                    Padding="10,4" FontSize="11" Background="#E3F2FD" BorderBrush="#42A5F5" Cursor="Hand"/>
                                     </StackPanel>
                                 </DockPanel>
+                            </Border>
+                            <!-- ★ 综合 D 值显示条（意愿开启时显示） -->
+                            <Border Padding="14,6" Background="#FFFDE7" BorderBrush="#FFE082" BorderThickness="0,0,0,1"
+        Visibility="{Binding IsDesirabilityVisible, Converter={StaticResource BoolToVis}}">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="综合 Desirability D = " FontSize="13" Foreground="#E65100" VerticalAlignment="Center"/>
+                                    <TextBlock Text="{Binding DesirabilityCompositeD, StringFormat={}{0:F4}}" 
+                   FontSize="15" FontWeight="Bold" Foreground="#E65100" VerticalAlignment="Center"/>
+                                    <TextBlock Text="    " />
+                                    <TextBlock Text="{Binding ProfilerCurrentPredicted}" FontSize="13" Foreground="#D32F2F" VerticalAlignment="Center"/>
+                                </StackPanel>
                             </Border>
 
                             <!-- 最优化结果 + 当前预测值 -->
@@ -928,6 +944,27 @@
                                         <Border Margin="2" BorderBrush="#E8EAED" BorderThickness="1" CornerRadius="4" Background="White">
                                             <oxy:PlotView Model="{Binding}" MinWidth="200" Height="220" Background="White"
                                                           PreviewMouseDown="Profiler_MouseDown" PreviewMouseMove="Profiler_MouseMove" PreviewMouseUp="Profiler_MouseUp"/>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                             
+                            </ItemsControl>
+                            <!-- ★ v3: 意愿行（d(y) 曲线，意愿函数开启时显示） -->
+                            <ItemsControl ItemsSource="{Binding DesirabilityPlots}" Margin="8,0,8,4"
+Visibility="{Binding IsDesirabilityVisible, Converter={StaticResource BoolToVis}}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <UniformGrid Rows="1"/>
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Margin="2" BorderBrush="#FFE082" BorderThickness="1" CornerRadius="4" Background="#FFFDE7">
+                                            <!-- ★ Feature 2: 加上鼠标拖拽事件 -->
+                                            <oxy:PlotView Model="{Binding}" MinWidth="200" Height="140" Background="#FFFDE7"
+                              PreviewMouseDown="DesirabilityProfiler_MouseDown"
+                              PreviewMouseMove="DesirabilityProfiler_MouseMove"
+                              PreviewMouseUp="DesirabilityProfiler_MouseUp"/>
                                         </Border>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
@@ -985,35 +1022,69 @@
 
 
                     <!-- Desirability -->
+                    <!-- Desirability -->
                     <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1" Margin="0,12,0,12">
                         <StackPanel>
                             <Border Background="#FFF8E1" Padding="14,8" BorderBrush="#FFE082" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
                                 <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="多响应 Desirability 优化" FontSize="12" FontWeight="SemiBold" Foreground="#F57F17"/>
+                                    <TextBlock Text="Desirability 优化（OLS 模型）" FontSize="12" FontWeight="SemiBold" Foreground="#F57F17"/>
                                     <Button Content="运行优化" Command="{Binding RunDesirabilityCommand}" Padding="8,2" Margin="16,0,0,0" FontSize="11" Background="#FFF3E0" BorderBrush="#FFB74D" Cursor="Hand"/>
                                 </StackPanel>
                             </Border>
-                            <StackPanel Margin="14,12">
+                            <StackPanel Margin="14,12" Visibility="{Binding HasOptimalResult, Converter={StaticResource BoolToVis}}">
+                                <!-- 综合 D 值 -->
                                 <TextBlock FontSize="16" FontWeight="SemiBold" Foreground="#E65100" Margin="0,0,0,8">
                                     <TextBlock.Text>
                                         <Binding Path="DesirabilityResult.CompositeD" StringFormat="综合 Desirability D = {0:F4}" FallbackValue="综合 Desirability D = —"/>
-                                    </TextBlock.Text></TextBlock>
+                                    </TextBlock.Text>
+                                </TextBlock>
+                                <!-- 各响应的个体 D -->
                                 <ItemsControl ItemsSource="{Binding DesirabilityResult.IndividualD}">
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
-                                            <StackPanel Orientation="Horizontal" Margin="0,2">
-                                                <TextBlock Text="{Binding ResponseName}" Width="100" FontSize="12" Foreground="#555"/>
-                                                <TextBlock Text="{Binding PredictedValue, StringFormat=预测: {0:F2}}" Width="100" FontSize="12"/>
-                                                <TextBlock FontSize="12" FontWeight="SemiBold" Foreground="#E65100">
-                                                    <TextBlock.Text>
-                                                        <Binding Path="D" StringFormat="d = {0:F4}"/>
-                                                    </TextBlock.Text></TextBlock>
-                                                <TextBlock Text="{Binding Goal}" FontSize="11" Foreground="#999" Margin="8,0,0,0"/>
-                                            </StackPanel>
+                                            <Border Margin="0,0,0,4" Padding="10,6" Background="#FFFDE7" CornerRadius="4" BorderBrush="#FFE082" BorderThickness="1">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="120"/>
+                                                        <ColumnDefinition Width="100"/>
+                                                        <ColumnDefinition Width="80"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="{Binding ResponseName}" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36" VerticalAlignment="Center"/>
+                                                    <TextBlock Grid.Column="1" FontSize="12" Foreground="#555" VerticalAlignment="Center">
+                                    <Run Text="预测: "/>
+                                    <Run Text="{Binding PredictedValue, StringFormat={}{0:F4}, Mode=OneWay}" FontFamily="Consolas" FontWeight="SemiBold"/>
+                                                    </TextBlock>
+                                                    <TextBlock Grid.Column="2" FontSize="12" Foreground="#E65100" VerticalAlignment="Center">
+                                    <Run Text="d = "/>
+                                    <Run Text="{Binding D, StringFormat={}{0:F4}, Mode=OneWay}" FontWeight="Bold"/>
+                                                    </TextBlock>
+                                                    <TextBlock Grid.Column="3" Text="{Binding Goal}" FontSize="10" Foreground="#999" VerticalAlignment="Center" HorizontalAlignment="Right"/>
+                                                </Grid>
+                                            </Border>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
-                                <TextBlock Text="提示：在设计向导 Step4 中配置各响应的优化目标（最大化/最小化/达标）和权重" FontSize="10" Foreground="#999" Margin="0,8,0,0"/>
+                                <!-- 最优因子组合 -->
+                                <TextBlock Text="最优因子组合:" FontSize="11" FontWeight="SemiBold" Foreground="#555" Margin="0,8,0,4"/>
+                                <ItemsControl ItemsSource="{Binding OptimalFactors}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <WrapPanel Orientation="Horizontal"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Margin="0,0,8,4" Padding="8,4" Background="#E3F2FD" CornerRadius="4">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding Key}" FontSize="11" Foreground="#1565C0" Margin="0,0,4,0"/>
+                                                    <TextBlock Text="=" FontSize="11" Foreground="#999" Margin="0,0,4,0"/>
+                                                    <TextBlock Text="{Binding DisplayValue}" FontSize="11" FontWeight="SemiBold" FontFamily="Consolas" Foreground="#0D47A1"/>
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
                             </StackPanel>
                         </StackPanel>
                     </Border>

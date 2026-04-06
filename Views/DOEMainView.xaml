@@ -74,42 +74,121 @@
                              Style="{StaticResource DOETabRadio}" Checked="TabRadio_Checked"/>
                         </StackPanel>
 
-                        <Button Grid.Column="1" Command="{Binding OpenDesignWizardCommand}" Margin="0,0,20,0"
-                            Height="30" VerticalAlignment="Center" Cursor="Hand" BorderThickness="0">
-                            <Button.Template>
-                                <ControlTemplate TargetType="Button">
-                                    <Border x:Name="Bd" CornerRadius="6" Padding="10,3">
-                                        <Border.Background>
-                                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                                                <GradientStop Color="#0078D4" Offset="0"/>
-                                                <GradientStop Color="#005FA3" Offset="1"/>
-                                            </LinearGradientBrush>
-                                        </Border.Background>
-                                        <StackPanel Orientation="Horizontal">
-                                            <Viewbox Width="11" Height="11" Margin="0,0,5,0">
-                                                <Canvas Width="16" Height="16">
-                                                    <Ellipse Canvas.Left="0.5" Canvas.Top="0.5" Width="15" Height="15"
-                                                             Stroke="White" StrokeThickness="1.3" Fill="Transparent"/>
-                                                    <Line X1="8" Y1="4.5" X2="8" Y2="11.5" Stroke="White" StrokeThickness="1.3"
-                                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-                                                    <Line X1="4.5" Y1="8" X2="11.5" Y2="8" Stroke="White" StrokeThickness="1.3"
-                                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-                                                </Canvas>
-                                            </Viewbox>
-                                            <TextBlock Text="新建方案" Foreground="White" FontSize="10.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                                        </StackPanel>
-                                    </Border>
-                                    <ControlTemplate.Triggers>
-                                        <Trigger Property="IsMouseOver" Value="True">
-                                            <Setter TargetName="Bd" Property="Opacity" Value="0.9"/>
-                                        </Trigger>
-                                        <Trigger Property="IsPressed" Value="True">
-                                            <Setter TargetName="Bd" Property="Opacity" Value="0.8"/>
-                                        </Trigger>
-                                    </ControlTemplate.Triggers>
-                                </ControlTemplate>
-                            </Button.Template>
-                        </Button>
+
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0,0,12,0">
+
+                            <!-- ★ 新增: 项目状态指示器（有活跃项目时显示） -->
+                            <Border Visibility="{Binding HasActiveProject, Converter={StaticResource BoolToVis}}"
+            Background="#EBF5EB" CornerRadius="6" Padding="10,4" Margin="0,0,8,0"
+            VerticalAlignment="Center">
+                                <StackPanel Orientation="Horizontal">
+                                    <Ellipse Width="6" Height="6" Fill="#22A06B" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                    <TextBlock VerticalAlignment="Center" FontSize="11">
+                <Run Text="{Binding CurrentProjectName, Mode=OneWay}" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                <Run Text=" · " Foreground="#8A8F9C"/>
+                <Run Text="{Binding ProjectPhaseText, Mode=OneWay}" Foreground="#0A6B35"/>
+                                    </TextBlock>
+                                    <TextBlock Text="{Binding ProjectStatusText}" Foreground="#8A8F9C" FontSize="10"
+                       VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- ★ 新增: 下一轮按钮（有活跃项目时显示） -->
+                            <Button Command="{Binding StartNextRoundCommand}"
+            Visibility="{Binding HasActiveProject, Converter={StaticResource BoolToVis}}"
+            VerticalAlignment="Center" Margin="0,0,8,0" Cursor="Hand">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" Background="#E8F5E9" CornerRadius="6" Padding="10,5"
+                        BorderBrush="#A5D6A7" BorderThickness="1">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="▶" FontSize="10" Foreground="#2E7D32" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                                <TextBlock Text="下一轮" FontSize="11" FontWeight="SemiBold" Foreground="#2E7D32" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#C8E6C9"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+
+                            <!-- ★ 新增: 项目管理下拉菜单 -->
+                            <Button VerticalAlignment="Center" Margin="0,0,10,0" Cursor="Hand" Click="ProjectMenuBtn_Click">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" Background="Transparent" CornerRadius="4" Padding="6,4"
+                        BorderBrush="#DDE0E4" BorderThickness="1">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="📋" FontSize="12" VerticalAlignment="Center" Margin="0,0,3,0"/>
+                                                <TextBlock Text="项目" FontSize="11" Foreground="#5A5F6D" VerticalAlignment="Center"/>
+                                                <TextBlock Text=" ▾" FontSize="9" Foreground="#8A8F9C" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#F2F4F7"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                                <Button.ContextMenu>
+                                    <ContextMenu Style="{StaticResource DOEContextMenu}">
+                                        <MenuItem Header="创建新项目" Style="{StaticResource DOEMenuItem}"
+                          Command="{Binding CreateProjectCommand}"/>
+                                        <MenuItem Header="打开已有项目" Style="{StaticResource DOEMenuItem}"
+                          Command="{Binding OpenProjectCommand}"/>
+                                    </ContextMenu>
+                                </Button.ContextMenu>
+                                <!-- 点击时弹出 ContextMenu -->
+                                <Button.Triggers>
+                                    <EventTrigger RoutedEvent="Button.Click">
+                                        <!-- WPF 没有原生的 Click→ContextMenu 触发器，需要在 code-behind 处理 -->
+                                    </EventTrigger>
+                                </Button.Triggers>
+                            </Button>
+
+                            <!-- 分隔线 -->
+                            <Border Width="1" Height="20" Background="#DDE0E4" VerticalAlignment="Center" Margin="0,0,10,0"/>
+
+                            <!-- 原有: 新建方案按钮（保持不变） -->
+                            <Button Command="{Binding CreateProjectCommand}" VerticalAlignment="Center" Cursor="Hand">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" CornerRadius="6" Padding="12,6">
+                                            <Border.Background>
+                                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                                    <GradientStop Color="#0078D4" Offset="0"/>
+                                                    <GradientStop Color="#005A9E" Offset="1"/>
+                                                </LinearGradientBrush>
+                                            </Border.Background>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Viewbox Width="13" Height="13" Margin="0,0,5,0">
+                                                    <Canvas Width="16" Height="16">
+                                                        <Line X1="8" Y1="2" X2="8" Y2="14" Stroke="White" StrokeThickness="2"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                                        <Line X1="2" Y1="8" X2="14" Y2="8" Stroke="White" StrokeThickness="2"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                                    </Canvas>
+                                                </Viewbox>
+                                                <TextBlock Text="新建方案" Foreground="White" FontSize="10.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Opacity" Value="0.9"/>
+                                            </Trigger>
+                                            <Trigger Property="IsPressed" Value="True">
+                                                <Setter TargetName="Bd" Property="Opacity" Value="0.8"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+                        </StackPanel>
+
                     </Grid>
                 </Border>
 

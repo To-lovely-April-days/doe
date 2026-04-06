@@ -5,8 +5,18 @@
     <UserControl.Resources>
         <ResourceDictionary Source="DOEStyles.xaml"/>
     </UserControl.Resources>
+
     <Grid Margin="22">
-        <Border Background="White" CornerRadius="10" BorderBrush="#ECEEF2" BorderThickness="1">
+        <Grid.ColumnDefinitions>
+            <!-- 左侧: 项目列表 -->
+            <ColumnDefinition Width="320"/>
+            <ColumnDefinition Width="12"/>
+            <!-- 右侧: 轮次列表 + 详情 -->
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- ═══ 左侧: 项目列表 ═══ -->
+        <Border Grid.Column="0" Background="White" CornerRadius="10" BorderBrush="#E8EAED" BorderThickness="1">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -14,64 +24,193 @@
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
-                <Border Background="#FAFBFC" Padding="14,10" BorderBrush="#E8EAED" BorderThickness="0,0,0,1" CornerRadius="10,10,0,0">
+                <!-- 标题栏 -->
+                <Border Grid.Row="0" Padding="16,12" BorderBrush="#E8EAED" BorderThickness="0,0,0,1">
                     <Grid>
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="历史批次" FontSize="13" FontWeight="SemiBold" Foreground="#1A1F36" VerticalAlignment="Center" Margin="0,0,12,0"/>
-                            <Button Content="刷新" Style="{StaticResource DOEPrimaryBtn}" Padding="14,5" Height="26" Command="{Binding RefreshCommand}" Margin="0,0,6,0"/>
-                            <Button Content="导出对比报告" Padding="14,5" Height="26" Command="{Binding ExportComparisonCommand}" Foreground="White" FontSize="10" FontWeight="SemiBold" Cursor="Hand" BorderThickness="0">
-                                <Button.Template>
-                                    <ControlTemplate TargetType="Button">
-                                        <Border CornerRadius="6" Padding="{TemplateBinding Padding}" Background="#5B2D90">
-                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                        </Border>
-                                    </ControlTemplate>
-                                </Button.Template>
-                            </Button>
-                        </StackPanel>
-                        <TextBlock Text="{Binding StatusMessage}" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="11" Foreground="#8A8F9C"/>
+                        <TextBlock Text="优化项目" FontSize="13" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                        <Button Content="刷新" Style="{StaticResource DOELinkBtn}" HorizontalAlignment="Right"
+                                FontSize="11" Command="{Binding RefreshCommand}"/>
                     </Grid>
                 </Border>
 
-                <DataGrid Grid.Row="1" ItemsSource="{Binding Batches}" SelectedItem="{Binding SelectedBatch}"
-                          Style="{StaticResource DOEDataGrid}" ColumnHeaderStyle="{StaticResource DOEColHeader}"
-                          MouseDoubleClick="BatchList_DoubleClick">
-                    <DataGrid.ContextMenu>
-                        <ContextMenu Style="{StaticResource DOEContextMenu}"
-                                     DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
-                            <MenuItem Header="编辑方案" Style="{StaticResource DOEMenuItem}" Command="{Binding EditBatchCommand}"
-                                      CommandParameter="{Binding SelectedBatch}"/>
-                            <MenuItem Header="跳转执行" Style="{StaticResource DOEMenuItem}" Command="{Binding NavigateToExecutionCommand}"/>
-                            <MenuItem Header="查看分析" Style="{StaticResource DOEMenuItem}" Command="{Binding NavigateToAnalysisCommand}"/>
-                            <Separator/>
-                            <MenuItem Header="导出 Excel 报告" Style="{StaticResource DOEMenuItem}" Command="{Binding ExportBatchCommand}"/>
-                            <MenuItem Header="复用此方案" Style="{StaticResource DOEMenuItem}" Command="{Binding ReuseBatchCommand}"/>
-                            <Separator/>
-                            <MenuItem Header="删除批次" Style="{StaticResource DOEMenuItemDanger}" Command="{Binding DeleteBatchCommand}"/>
-                        </ContextMenu>
-                    </DataGrid.ContextMenu>
-                    <DataGrid.Columns>
-                        <DataGridTextColumn Header="批次名称" Binding="{Binding BatchName}" Width="*">
-                            <DataGridTextColumn.ElementStyle>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="FontWeight" Value="SemiBold"/>
-                                    <Setter Property="Foreground" Value="#1A1F36"/>
-                                    <Setter Property="Padding" Value="18,0,0,0"/>
-                                    <Setter Property="VerticalAlignment" Value="Center"/>
-                                </Style>
-                            </DataGridTextColumn.ElementStyle>
-                        </DataGridTextColumn>
-                        <DataGridTextColumn Header="设计方法" Binding="{Binding DesignMethod}" Width="110"/>
-                        <DataGridTextColumn Header="进度" Binding="{Binding ProgressText}" Width="90"/>
-                        <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="80"/>
-                        <DataGridTextColumn Header="创建时间" Binding="{Binding CreatedTime, StringFormat={}{0:MM-dd HH:mm}}" Width="100"/>
-                    </DataGrid.Columns>
-                </DataGrid>
+                <!-- 项目列表 -->
+                <ListBox Grid.Row="1" ItemsSource="{Binding Projects}"
+                         SelectedItem="{Binding SelectedProject}"
+                         BorderThickness="0" Background="Transparent"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="Padding" Value="14,10"/>
+                            <Setter Property="Margin" Value="4,2"/>
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="ListBoxItem">
+                                        <Border x:Name="Bd" Background="Transparent" CornerRadius="6"
+                                                Padding="{TemplateBinding Padding}" Margin="{TemplateBinding Margin}">
+                                            <ContentPresenter/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#F5F6F8"/>
+                                            </Trigger>
+                                            <Trigger Property="IsSelected" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#E8F0FE"/>
+                                                <Setter TargetName="Bd" Property="BorderBrush" Value="#B3D1F7"/>
+                                                <Setter TargetName="Bd" Property="BorderThickness" Value="1"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel>
+                                <Grid>
+                                    <TextBlock Text="{Binding ProjectName}" FontSize="12.5" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                                    <TextBlock Text="{Binding PhaseText}" HorizontalAlignment="Right" FontSize="10" Foreground="#0078D4"/>
+                                </Grid>
+                                <TextBlock FontSize="10.5" Foreground="#8A8F9C" Margin="0,3,0,0">
+                                    <Run Text="{Binding TotalBatches, StringFormat='{}{0} 轮', Mode=OneWay}"/>
+                                    <Run Text=" · "/>
+                                    <Run Text="{Binding TotalExperiments, StringFormat='{}{0} 组', Mode=OneWay}"/>
+                                    <Run Text=" · "/>
+                                    <Run Text="{Binding UpdatedTime, StringFormat='{}{0:MM-dd}', Mode=OneWay}"/>
+                                </TextBlock>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
 
-                <Border Grid.Row="2" Background="#FAFBFC" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,1,0,0">
-                    <TextBlock Text="双击行 → 跳转执行页  |  右键行 → 操作菜单" FontSize="10" Foreground="#A0A4B0"/>
+                <!-- 底部状态 -->
+                <Border Grid.Row="2" Padding="14,8" BorderBrush="#E8EAED" BorderThickness="0,1,0,0">
+                    <TextBlock Text="{Binding StatusMessage}" FontSize="10.5" Foreground="#8A8F9C"/>
                 </Border>
             </Grid>
         </Border>
+
+        <!-- ═══ 右侧: 轮次列表 + 详情 ═══ -->
+        <Grid Grid.Column="2">
+            <Grid.RowDefinitions>
+                <!-- 轮次列表 -->
+                <RowDefinition Height="*" MinHeight="200"/>
+                <RowDefinition Height="8"/>
+                <!-- 轮次总结 -->
+                <RowDefinition Height="Auto" MaxHeight="220"/>
+            </Grid.RowDefinitions>
+
+            <!-- 轮次列表 -->
+            <Border Grid.Row="0" Background="White" CornerRadius="10" BorderBrush="#E8EAED" BorderThickness="1">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <Border Grid.Row="0" Padding="16,12" BorderBrush="#E8EAED" BorderThickness="0,0,0,1">
+                        <TextBlock FontSize="13" FontWeight="SemiBold" Foreground="#1A1F36">
+                            <Run Text="轮次记录"/>
+                            <Run Text="{Binding SelectedProject.ProjectName, StringFormat=' — {0}', FallbackValue='', Mode=OneWay}" Foreground="#8A8F9C" FontWeight="Normal"/>
+                        </TextBlock>
+                    </Border>
+
+                    <!-- 有选中项目时显示轮次 -->
+                    <DataGrid Grid.Row="1" ItemsSource="{Binding Rounds}" SelectedItem="{Binding SelectedRound}"
+                              Style="{StaticResource DOEDataGrid}" ColumnHeaderStyle="{StaticResource DOEColHeader}"
+                              Visibility="{Binding HasSelectedProject, Converter={StaticResource BoolToVis}}">
+                        <DataGrid.ContextMenu>
+                            <ContextMenu Style="{StaticResource DOEContextMenu}"
+                                         DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                <MenuItem Header="跳转执行" Style="{StaticResource DOEMenuItem}" Command="{Binding NavigateToExecutionCommand}"/>
+                                <MenuItem Header="查看分析" Style="{StaticResource DOEMenuItem}" Command="{Binding NavigateToAnalysisCommand}"/>
+                                <Separator/>
+                                <MenuItem Header="导出 Excel" Style="{StaticResource DOEMenuItem}"
+                                          Command="{Binding ExportRoundCommand}" CommandParameter="{Binding SelectedRound}"/>
+                                <Separator/>
+                                <MenuItem Header="删除此轮" Foreground="#D32F2F"
+                                          Command="{Binding DeleteRoundCommand}" CommandParameter="{Binding SelectedRound}"/>
+                            </ContextMenu>
+                        </DataGrid.ContextMenu>
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="轮次" Binding="{Binding RoundNumber}" Width="50">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="FontWeight" Value="Bold"/>
+                                        <Setter Property="HorizontalAlignment" Value="Center"/>
+                                        <Setter Property="Foreground" Value="#0078D4"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="阶段" Binding="{Binding PhaseText}" Width="60"/>
+                            <DataGridTextColumn Header="设计方法" Binding="{Binding DesignMethodText}" Width="90"/>
+                            <DataGridTextColumn Header="进度" Binding="{Binding ProgressText}" Width="70"/>
+                            <DataGridTextColumn Header="状态" Binding="{Binding StatusText}" Width="70"/>
+                            <DataGridTextColumn Header="模型" Binding="{Binding RSquaredText}" Width="90">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Foreground" Value="#0D7A3E"/>
+                                        <Setter Property="FontWeight" Value="SemiBold"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="时间" Binding="{Binding CreatedTime, StringFormat='{}{0:MM-dd HH:mm}'}" Width="100"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- 未选中项目时提示 -->
+                    <TextBlock Grid.Row="1" Text="← 请在左侧选择一个项目" FontSize="13" Foreground="#A0A4B0"
+                               HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding HasSelectedProject}" Value="False">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </Grid>
+            </Border>
+
+            <!-- 轮次总结面板 -->
+            <Border Grid.Row="2" Background="White" CornerRadius="10" BorderBrush="#E8EAED" BorderThickness="1"
+                    Visibility="{Binding HasRoundSummary, Converter={StaticResource BoolToVis}}"
+                    Padding="16,12">
+                <StackPanel>
+                    <TextBlock Text="轮次分析总结" FontSize="12" FontWeight="SemiBold" Foreground="#1A1F36" Margin="0,0,0,8"/>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="模型质量" FontSize="10" Foreground="#8A8F9C"/>
+                            <TextBlock FontSize="12" Foreground="#1A1F36" Margin="0,2,0,0">
+                                <Run Text="R² = "/>
+                                <Run Text="{Binding RoundSummary.RSquared, StringFormat='{}{0:F4}', FallbackValue='—'}" FontWeight="SemiBold"/>
+                            </TextBlock>
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="1">
+                            <TextBlock Text="最优响应" FontSize="10" Foreground="#8A8F9C"/>
+                            <TextBlock FontSize="12" Foreground="#0078D4" FontWeight="SemiBold" Margin="0,2,0,0"
+                                       Text="{Binding RoundSummary.BestResponseValue, StringFormat='{}{0:F2}', FallbackValue='—'}"/>
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Text="系统推荐" FontSize="10" Foreground="#8A8F9C"/>
+                            <TextBlock Text="{Binding RoundSummary.RecommendationReason, FallbackValue='—'}"
+                                       FontSize="11" Foreground="#4A5066" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                        </StackPanel>
+                    </Grid>
+                </StackPanel>
+            </Border>
+        </Grid>
     </Grid>
 </UserControl>

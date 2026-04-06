@@ -49,8 +49,10 @@ namespace MaxChemical.Modules.DOE.Data
             batch.BatchId = $"DOE_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid().ToString("N")[..6]}";
 
             const string sql = @"
-                INSERT INTO doe_batches (batch_id, flow_id, flow_name, batch_name, design_method, status, design_config_json)
-                VALUES (@batchId, @flowId, @flowName, @batchName, @designMethod, @status, @configJson)";
+    INSERT INTO doe_batches (batch_id, flow_id, flow_name, batch_name, design_method, status, design_config_json,
+        project_id, round_number, project_phase)
+    VALUES (@batchId, @flowId, @flowName, @batchName, @designMethod, @status, @configJson,
+        @projectId, @roundNumber, @projectPhase)";
 
             using var conn = CreateConnection();
             await conn.OpenAsync();
@@ -62,6 +64,9 @@ namespace MaxChemical.Modules.DOE.Data
             cmd.Parameters.AddWithValue("@designMethod", batch.DesignMethod.ToString());
             cmd.Parameters.AddWithValue("@status", batch.Status.ToString());
             cmd.Parameters.AddWithValue("@configJson", batch.DesignConfigJson ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@projectId", (object?)batch.ProjectId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@roundNumber", (object?)batch.RoundNumber ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@projectPhase", (object?)batch.ProjectPhase?.ToString() ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync();
 
             _logger.LogInformation("创建 DOE 批次: {BatchId} - {BatchName}", batch.BatchId, batch.BatchName);
@@ -538,7 +543,14 @@ namespace MaxChemical.Modules.DOE.Data
             Status = Enum.TryParse<DOEBatchStatus>(GetStr(r, "status"), out var s) ? s : DOEBatchStatus.Designing,
             DesignConfigJson = GetStrN(r, "design_config_json"),
             CreatedTime = GetDt(r, "created_time"),
-            UpdatedTime = GetDt(r, "updated_time")
+            UpdatedTime = GetDt(r, "updated_time"),
+            // ★ 新增: 安全读取项目关联字段
+            ProjectId = HasColumn(r, "project_id") ? GetStrN(r, "project_id") : null,
+            RoundNumber = HasColumn(r, "round_number") && !IsNull(r, "round_number")
+        ? GetInt(r, "round_number") : null,
+            ProjectPhase = HasColumn(r, "project_phase") && !IsNull(r, "project_phase")
+        ? (Enum.TryParse<DOEProjectPhase>(GetStr(r, "project_phase"), out var pp) ? pp : null)
+        : null
         };
 
         private static DOEFactor MapFactor(DbDataReader r) => new()
@@ -642,7 +654,7 @@ namespace MaxChemical.Modules.DOE.Data
             state.RMSE = GetDblN(r, "rmse");
             state.EvolutionHistoryJson = GetStrN(r, "evolution_history_json");
             state.LastTrainedTime = GetDtN(r, "last_trained_time");
-
+            state.ProjectId = HasColumn(r, "project_id") ? GetStrN(r, "project_id") : null;
             return state;
         }
 

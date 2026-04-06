@@ -7,9 +7,102 @@ namespace MaxChemical.Modules.DOE.Data
 {
     /// <summary>
     /// DOE 数据仓储接口 — 6 张表的 CRUD + 复合查询
+    /// 
+    /// ★ 修改: 新增 Project / ProjectFactor / RoundSummary 相关方法
+    ///   所有原有方法签名不变，保持完全兼容。
     /// </summary>
     public interface IDOERepository
     {
+        // ══════════════════════════════════════════════════════
+        // ★ 新增: Project 项目
+        // ══════════════════════════════════════════════════════
+
+        /// <summary>创建项目</summary>
+        Task<string> CreateProjectAsync(DOEProject project);
+
+        /// <summary>获取项目（不含子实体）</summary>
+        Task<DOEProject?> GetProjectAsync(string projectId);
+
+        /// <summary>获取项目（含 ProjectFactors + Batches + RoundSummaries）</summary>
+        Task<DOEProject?> GetProjectWithDetailsAsync(string projectId);
+
+        /// <summary>获取所有活跃项目摘要</summary>
+        Task<List<DOEProjectSummary>> GetActiveProjectsAsync();
+
+        /// <summary>获取所有项目摘要（含已完成和归档）</summary>
+        Task<List<DOEProjectSummary>> GetAllProjectSummariesAsync(int limit = 50);
+
+        /// <summary>更新项目基础信息</summary>
+        Task UpdateProjectAsync(DOEProject project);
+
+        /// <summary>更新项目阶段</summary>
+        Task UpdateProjectPhaseAsync(string projectId, DOEProjectPhase phase);
+
+        /// <summary>更新项目状态</summary>
+        Task UpdateProjectStatusAsync(string projectId, DOEProjectStatus status);
+
+        /// <summary>更新项目最优值和统计</summary>
+        Task UpdateProjectBestAsync(string projectId, double bestValue, string bestFactorsJson, int totalExperiments, int completedRounds);
+
+        /// <summary>删除项目及所有关联数据</summary>
+        Task DeleteProjectWithChildrenAsync(string projectId);
+
+        // ══════════════════════════════════════════════════════
+        // ★ 新增: ProjectFactor 项目因子池
+        // ══════════════════════════════════════════════════════
+
+        /// <summary>保存项目因子列表（覆盖写入）</summary>
+        Task SaveProjectFactorsAsync(string projectId, List<DOEProjectFactor> factors);
+
+        /// <summary>获取项目所有因子</summary>
+        Task<List<DOEProjectFactor>> GetProjectFactorsAsync(string projectId);
+
+        /// <summary>获取项目活跃因子</summary>
+        Task<List<DOEProjectFactor>> GetActiveProjectFactorsAsync(string projectId);
+
+        /// <summary>更新单个因子状态</summary>
+        Task UpdateProjectFactorStatusAsync(int factorId, ProjectFactorStatus status,
+            string? reason = null, string? batchId = null);
+
+        /// <summary>更新因子范围</summary>
+        Task UpdateProjectFactorBoundsAsync(int factorId, double lower, double upper,
+            string boundsHistoryJson);
+
+        // ══════════════════════════════════════════════════════
+        // ★ 新增: RoundSummary 轮次总结
+        // ══════════════════════════════════════════════════════
+
+        /// <summary>保存轮次总结</summary>
+        Task SaveRoundSummaryAsync(DOERoundSummary summary);
+
+        /// <summary>获取项目所有轮次总结</summary>
+        Task<List<DOERoundSummary>> GetRoundSummariesAsync(string projectId);
+
+        /// <summary>获取特定批次的轮次总结</summary>
+        Task<DOERoundSummary?> GetRoundSummaryByBatchAsync(string batchId);
+
+        /// <summary>更新用户决策</summary>
+        Task UpdateRoundDecisionAsync(int summaryId, NextStepRecommendation decision, string? notes);
+
+        // ══════════════════════════════════════════════════════
+        // ★ 新增: 按项目查询批次和数据
+        // ══════════════════════════════════════════════════════
+
+        /// <summary>获取项目下所有批次</summary>
+        Task<List<DOEBatch>> GetBatchesByProjectAsync(string projectId);
+
+        /// <summary>获取项目下所有已完成实验数据（用于跨批次 GPR 训练）</summary>
+        Task<List<DOERunRecord>> GetAllCompletedRunsByProjectAsync(string projectId);
+
+        /// <summary>
+        /// 按项目 ID 查找 GPR 模型
+        /// </summary>
+        Task<GPRModelState?> GetGPRModelByProjectAsync(string projectId, string factorSignature);
+
+        // ══════════════════════════════════════════════════════
+        // 原有接口（完全不变）
+        // ══════════════════════════════════════════════════════
+
         // ── Batch ──────────────────────────────────
 
         Task<string> CreateBatchAsync(DOEBatch batch);
@@ -47,87 +140,29 @@ namespace MaxChemical.Modules.DOE.Data
 
         // ── GPR Model State ────────────────────────
 
-
         Task<GPRModelState?> GetGPRModelStateAsync(string flowId);
         Task UpdateGPRModelStateAsync(GPRModelState state);
         Task DeleteGPRModelStateAsync(string flowId);
 
         // ── 复合查询 ──────────────────────────────
 
-        /// <summary>
-        /// 获取某流程下所有批次的汇总信息（用于历史列表展示）
-        /// </summary>
         Task<List<DOEBatchSummary>> GetBatchSummariesByFlowAsync(string flowId);
-
-        /// <summary>
-        /// 获取所有批次摘要（不限流程，按时间倒序，带 Runs 统计）
-        /// </summary>
         Task<List<DOEBatchSummary>> GetAllBatchSummariesAsync(int limit = 50);
-
-        /// <summary>
-        /// 获取某流程下所有实测+导入的数据（用于 GPR 训练）
-        /// </summary>
         Task<List<DOERunRecord>> GetAllTrainingDataByFlowAsync(string flowId);
-
-        /// <summary>
-        /// 按 FlowId + FactorSignature 获取模型
-        /// </summary>
         Task<GPRModelState?> GetGPRModelStateAsync(string flowId, string factorSignature);
-
-        /// <summary>
-        /// 获取某个流程的所有 GPR 模型
-        /// </summary>
         Task<List<GPRModelState>> GetGPRModelsByFlowAsync(string flowId);
-
-        /// <summary>
-        /// 保存/更新 GPR 模型（按 FlowId + FactorSignature upsert）
-        /// </summary>
         Task SaveGPRModelStateAsync(GPRModelState state);
-
-        /// <summary>
-        /// 删除指定模型
-        /// </summary>
         Task DeleteGPRModelAsync(int modelId);
-
-        /// <summary>
-        /// 查询同 FlowId + FactorSignature 下有多少个方案（用于删除时判断模型是否还被其他方案使用）
-        /// </summary>
         Task<int> GetBatchCountBySignatureAsync(string flowId, string factorSignature);
-
-        /// <summary>
-        /// 删除批次及所有子表数据（因子、响应、Runs、停止条件）
-        /// </summary>
         Task DeleteBatchWithChildrenAsync(string batchId);
-
-        /// <summary>
-        /// 获取所有 GPR 模型（不限流程）
-        /// </summary>
         Task<List<GPRModelState>> GetAllGPRModelsAsync();
-
         Task<GPRModelState?> GetGPRModelByIdAsync(int modelId);
 
-        // ──  新增: Desirability 配置持久化 ──
+        // ── Desirability ──────────────────────────
 
-        /// <summary>
-        ///  新增: 保存 Desirability 配置 JSON
-        /// </summary>
-        /// <param name="batchId">批次 ID</param>
-        /// <param name="configJson">配置 JSON 字符串</param>
         Task SaveDesirabilityConfigAsync(string batchId, string configJson);
-
-        /// <summary>
-        ///  新增: 获取 Desirability 配置 JSON
-        /// </summary>
         Task<string?> GetDesirabilityConfigJsonAsync(string batchId);
-
-        /// <summary>
-        ///  新增: 保存 OLS 分析结果 JSON
-        /// </summary>
         Task SaveOlsResultAsync(string batchId, string responseName, string resultJson);
-
-        /// <summary>
-        ///  新增: 获取 OLS 分析结果 JSON
-        /// </summary>
         Task<string?> GetOlsResultJsonAsync(string batchId, string responseName);
     }
 
@@ -146,10 +181,43 @@ namespace MaxChemical.Modules.DOE.Data
         public double? BestResponseValue { get; set; }
         public DateTime CreatedTime { get; set; }
 
+        // ★ 新增: 项目关联
+        public string? ProjectId { get; set; }
+        public int? RoundNumber { get; set; }
+
         /// <summary>进度显示文本（XAML 绑定用）</summary>
         public string ProgressText => $"{CompletedRuns}/{TotalRuns}";
 
         /// <summary>是否可编辑（仅 Ready 状态）</summary>
         public bool CanEdit => Status == DOEBatchStatus.Ready;
+    }
+
+    /// <summary>
+    /// ★ 新增: 项目摘要信息（列表展示用）
+    /// </summary>
+    public class DOEProjectSummary
+    {
+        public string ProjectId { get; set; } = string.Empty;
+        public string ProjectName { get; set; } = string.Empty;
+        public string? FlowName { get; set; }
+        public DOEProjectPhase CurrentPhase { get; set; }
+        public DOEProjectStatus Status { get; set; }
+        public int TotalBatches { get; set; }
+        public int TotalExperiments { get; set; }
+        public double? BestResponseValue { get; set; }
+        public DateTime CreatedTime { get; set; }
+        public DateTime UpdatedTime { get; set; }
+
+        /// <summary>阶段显示文本</summary>
+        public string PhaseText => CurrentPhase switch
+        {
+            DOEProjectPhase.Screening => "筛选",
+            DOEProjectPhase.PathSearch => "路径探索",
+            DOEProjectPhase.RSM => "响应面优化",
+            DOEProjectPhase.Augmenting => "增强补点",
+            DOEProjectPhase.Confirmation => "验证",
+            DOEProjectPhase.Completed => "已完成",
+            _ => CurrentPhase.ToString()
+        };
     }
 }

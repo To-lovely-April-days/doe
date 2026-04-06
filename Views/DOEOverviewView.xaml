@@ -6,20 +6,17 @@
         <ResourceDictionary Source="DOEStyles.xaml"/>
     </UserControl.Resources>
 
-    <!-- 用 DockPanel 让列表占满底部 -->
     <DockPanel Margin="22">
 
         <!-- ═══ 快捷操作（顶部） ═══ -->
         <Grid DockPanel.Dock="Top" Margin="0,0,0,18">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
-                <!-- 有可恢复批次时显示第二列 -->
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
-            <!-- 新建方案卡（始终显示，无继续时占满整行） -->
-            <Border Grid.Column="0" CornerRadius="12" BorderThickness="1" BorderBrush="#C2D9F5" Padding="26,24"
-                    Margin="{Binding HeroMargin}">
+            <!-- 新建项目卡 -->
+            <Border Grid.Column="0" CornerRadius="12" BorderThickness="1" BorderBrush="#C2D9F5" Padding="26,24">
                 <Border.Background>
                     <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
                         <GradientStop Color="#EBF3FE" Offset="0"/>
@@ -35,16 +32,16 @@
                         <Border Background="#140078D4" CornerRadius="4" Padding="8,3" HorizontalAlignment="Left" Margin="0,0,0,10">
                             <TextBlock Text="QUICK START" FontSize="9" FontWeight="Bold" Foreground="#0062B8"/>
                         </Border>
-                        <TextBlock Text="创建新 DOE 方案" FontSize="15" FontWeight="Bold" Foreground="#0C1D3A" Margin="0,0,0,3"/>
-                        <TextBlock Text="全因子 · 部分因子 · Taguchi 正交 · Excel 导入" FontSize="11" Foreground="#5A7CA8" Margin="0,0,0,16"/>
-                        <Button Content="打开设计向导" Style="{StaticResource DOEPrimaryBtn}" Padding="22,8"
+                        <TextBlock Text="创建新优化项目" FontSize="15" FontWeight="Bold" Foreground="#0C1D3A" Margin="0,0,0,3"/>
+                        <TextBlock Text="筛选 → 爬坡 → RSM → 验证，全流程自动引导" FontSize="11" Foreground="#5A7CA8" Margin="0,0,0,16"/>
+                        <Button Content="新建项目" Style="{StaticResource DOEPrimaryBtn}" Padding="22,8"
                                 HorizontalAlignment="Left"
-                                Command="{Binding DataContext.OpenDesignWizardCommand, RelativeSource={RelativeSource AncestorType=Window}}"/>
+                                Command="{Binding DataContext.CreateProjectCommand, RelativeSource={RelativeSource AncestorType=Window}}"/>
                     </StackPanel>
                 </Grid>
             </Border>
 
-            <!-- 继续执行卡（仅有可恢复批次时显示） -->
+            <!-- 继续执行卡（有正在执行的批次时显示）-->
             <Border Grid.Column="1" CornerRadius="12" BorderThickness="1" BorderBrush="#B5E3C6" Padding="26,24"
                     Width="350" Margin="14,0,0,0"
                     Visibility="{Binding HasResumableBatch, Converter={StaticResource BoolToVis}}">
@@ -70,89 +67,36 @@
             </Border>
         </Grid>
 
-        <!-- ═══ 指标卡（顶部） ═══ -->
-        <UniformGrid DockPanel.Dock="Top" Columns="4" Margin="0,0,0,18">
-            <!-- 总批次 -->
+        <!-- ═══ 指标卡 ═══ -->
+        <UniformGrid DockPanel.Dock="Top" Columns="3" Margin="0,0,0,18">
+            <!-- 总项目数 -->
             <Border Background="White" CornerRadius="14" BorderBrush="#ECEEF2" BorderThickness="1" Padding="20" Margin="0,0,6,0">
-                <Grid>
-                    <Canvas HorizontalAlignment="Right" VerticalAlignment="Stretch" Width="80" Opacity="0.06" IsHitTestVisible="False">
-                        <Rectangle Canvas.Left="5" Canvas.Top="5" Width="28" Height="28" RadiusX="6" RadiusY="6" Fill="#0078D4"/>
-                        <Rectangle Canvas.Left="40" Canvas.Top="5" Width="28" Height="28" RadiusX="6" RadiusY="6" Fill="#0078D4"/>
-                        <Rectangle Canvas.Left="5" Canvas.Top="40" Width="28" Height="28" RadiusX="6" RadiusY="6" Fill="#0078D4"/>
-                        <Rectangle Canvas.Left="40" Canvas.Top="40" Width="28" Height="28" RadiusX="6" RadiusY="6" Fill="#0078D4"/>
-                    </Canvas>
-                    <StackPanel>
-                        <TextBlock Text="总批次" FontSize="10" Foreground="#8A8F9C" FontWeight="SemiBold" Margin="0,0,0,6"/>
-                        <TextBlock Text="{Binding TotalBatchCount}" FontSize="30" FontWeight="Bold" Foreground="#1A1F36"/>
-                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                            <Border Background="#EBF3FE" CornerRadius="10" Padding="8,3" Margin="0,0,8,0">
-                                <TextBlock Text="+3 本月" FontSize="9" FontWeight="SemiBold" Foreground="#0062B8"/>
-                            </Border>
-                            <TextBlock Text="累计实验方案" FontSize="10" Foreground="#A0A4B0" VerticalAlignment="Center"/>
-                        </StackPanel>
-                    </StackPanel>
-                </Grid>
+                <StackPanel>
+                    <TextBlock Text="优化项目" FontSize="10" Foreground="#8A8F9C" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                    <TextBlock Text="{Binding TotalProjectCount}" FontSize="28" FontWeight="Bold" Foreground="#1A1F36"/>
+                    <TextBlock Text="{Binding ActiveProjectCount, StringFormat='{}活跃 {0} 个'}" FontSize="10" Foreground="#A0A4B0" Margin="0,6,0,0"/>
+                </StackPanel>
             </Border>
-            <!-- 完成实验组 -->
-            <Border Background="White" CornerRadius="14" BorderBrush="#ECEEF2" BorderThickness="1" Padding="20" Margin="3,0">
-                <Grid>
-                    <Canvas HorizontalAlignment="Right" VerticalAlignment="Stretch" Width="80" Opacity="0.06" IsHitTestVisible="False">
-                        <Polyline Points="5,55 25,25 45,40 65,10 80,20" Stroke="#16C60C" StrokeThickness="4"
-                                  StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-                    </Canvas>
-                    <StackPanel>
-                        <TextBlock Text="完成实验组" FontSize="10" Foreground="#8A8F9C" FontWeight="SemiBold" Margin="0,0,0,6"/>
-                        <TextBlock Text="{Binding TotalCompletedRuns}" FontSize="30" FontWeight="Bold" Foreground="#1A1F36"/>
-                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                            <Border Background="#E8F8EE" CornerRadius="10" Padding="8,3" Margin="0,0,8,0">
-                                <TextBlock Text="96.8%" FontSize="9" FontWeight="SemiBold" Foreground="#0D7A3E"/>
-                            </Border>
-                            <TextBlock Text="实验成功率" FontSize="10" Foreground="#A0A4B0" VerticalAlignment="Center"/>
-                        </StackPanel>
-                    </StackPanel>
-                </Grid>
+
+            <!-- 总实验数 -->
+            <Border Background="White" CornerRadius="14" BorderBrush="#ECEEF2" BorderThickness="1" Padding="20" Margin="3,0,3,0">
+                <StackPanel>
+                    <TextBlock Text="总实验次数" FontSize="10" Foreground="#8A8F9C" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                    <TextBlock Text="{Binding TotalExperiments}" FontSize="28" FontWeight="Bold" Foreground="#0078D4"/>
+                    <TextBlock Text="跨所有项目累计" FontSize="10" Foreground="#A0A4B0" Margin="0,6,0,0"/>
+                </StackPanel>
             </Border>
-            <!-- 最优转化率 -->
-            <Border Background="White" CornerRadius="14" BorderBrush="#ECEEF2" BorderThickness="1" Padding="20" Margin="3,0">
-                <Grid>
-                    <Canvas HorizontalAlignment="Right" VerticalAlignment="Stretch" Width="80" Opacity="0.06" IsHitTestVisible="False">
-                        <Polygon Points="40,2 48,30 78,30 54,47 62,76 40,58 18,76 26,47 2,30 32,30" Fill="#FF8C00"/>
-                    </Canvas>
-                    <StackPanel>
-                        <TextBlock Text="最优转化率" FontSize="10" Foreground="#8A8F9C" FontWeight="SemiBold" Margin="0,0,0,6"/>
-                        <TextBlock Text="{Binding BestResult}" FontSize="30" FontWeight="Bold" Foreground="#0078D4"/>
-                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                            <Border Background="#FFF5E6" CornerRadius="10" Padding="8,3" Margin="0,0,8,0">
-                                <TextBlock Text="第 14 组" FontSize="9" FontWeight="SemiBold" Foreground="#9A6F12"/>
-                            </Border>
-                            <TextBlock Text="催化剂筛选批次" FontSize="10" Foreground="#A0A4B0" VerticalAlignment="Center"/>
-                        </StackPanel>
-                    </StackPanel>
-                </Grid>
-            </Border>
+
             <!-- GPR 模型 -->
             <Border Background="White" CornerRadius="14" BorderBrush="#ECEEF2" BorderThickness="1" Padding="20" Margin="6,0,0,0">
-                <Grid>
-                    <Canvas HorizontalAlignment="Right" VerticalAlignment="Stretch" Width="80" Opacity="0.06" IsHitTestVisible="False">
-                        <Ellipse Canvas.Left="10" Canvas.Top="10" Width="60" Height="60" Stroke="#7B61FF" StrokeThickness="4"/>
-                        <Path Data="M15,55 Q28,15 40,35 Q55,55 68,15" Stroke="#7B61FF" StrokeThickness="3.5"
-                              StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-                    </Canvas>
-                    <StackPanel>
-                        <TextBlock Text="GPR 模型" FontSize="10" Foreground="#8A8F9C" FontWeight="SemiBold" Margin="0,0,0,6"/>
-                        <TextBlock Text="{Binding GPRStatusSummary}" FontSize="19" FontWeight="Bold" Foreground="#0D7A3E"/>
-                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                            <Border Background="#F0EDFE" CornerRadius="10" Padding="8,3" Margin="0,0,8,0">
-                                <TextBlock Text="45 组数据" FontSize="9" FontWeight="SemiBold" Foreground="#5B2D90"/>
-                            </Border>
-                            <TextBlock Text="已激活" FontSize="10" Foreground="#A0A4B0" VerticalAlignment="Center"/>
-                        </StackPanel>
-                    </StackPanel>
-                </Grid>
+                <StackPanel>
+                    <TextBlock Text="GPR 模型" FontSize="10" Foreground="#8A8F9C" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                    <TextBlock Text="{Binding GPRStatusSummary}" FontSize="19" FontWeight="Bold" Foreground="#0D7A3E"/>
+                </StackPanel>
             </Border>
         </UniformGrid>
 
-        <!-- ═══ 方案列表（DockPanel.Dock 不设，自动占满剩余空间） ═══ -->
+        <!-- ═══ 项目列表（占满剩余空间） ═══ -->
         <Border Background="White" CornerRadius="10" BorderBrush="#E8EAED" BorderThickness="1">
             <Grid>
                 <Grid.RowDefinitions>
@@ -162,49 +106,99 @@
 
                 <Border Grid.Row="0" Padding="20,13" BorderBrush="#E8EAED" BorderThickness="0,0,0,1">
                     <Grid>
-                        <TextBlock Text="最近实验方案" FontSize="13" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                        <TextBlock Text="我的优化项目" FontSize="13" FontWeight="SemiBold" Foreground="#1A1F36"/>
                         <Button Content="查看全部历史 →" Style="{StaticResource DOELinkBtn}" HorizontalAlignment="Right"
                                 FontSize="11" Command="{Binding GoToHistoryCommand}"/>
                     </Grid>
                 </Border>
 
-                <DataGrid Grid.Row="1" ItemsSource="{Binding RecentBatches}" SelectedItem="{Binding SelectedBatch}"
-                          Style="{StaticResource DOEDataGrid}"
-                          ColumnHeaderStyle="{StaticResource DOEColHeader}"
-                          MouseDoubleClick="RecentList_DoubleClick"
-                          VerticalScrollBarVisibility="Auto">
-                    <DataGrid.ContextMenu>
-                        <ContextMenu Style="{StaticResource DOEContextMenu}"
-                                     DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
-                            <MenuItem Header="编辑方案" Style="{StaticResource DOEMenuItem}" Command="{Binding EditBatchCommand}"/>
-                            <MenuItem Header="跳转执行" Style="{StaticResource DOEMenuItem}" Command="{Binding NavigateToExecutionCommand}"/>
-                            <MenuItem Header="查看分析" Style="{StaticResource DOEMenuItem}" Command="{Binding NavigateToAnalysisCommand}"/>
-                            <Separator/>
-                            <MenuItem Header="导出 Excel 报告" Style="{StaticResource DOEMenuItem}" Command="{Binding ExportBatchCommand}"/>
-                            <MenuItem Header="复用此方案" Style="{StaticResource DOEMenuItem}" Command="{Binding ReuseBatchCommand}"/>
-                            <Separator/>
-                            <MenuItem Header="删除批次" Style="{StaticResource DOEMenuItemDanger}" Command="{Binding DeleteBatchCommand}"/>
-                        </ContextMenu>
-                    </DataGrid.ContextMenu>
-                    <DataGrid.Columns>
-                        <DataGridTextColumn Header="批次名称" Binding="{Binding BatchName}" Width="*">
-                            <DataGridTextColumn.ElementStyle>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="FontWeight" Value="SemiBold"/>
-                                    <Setter Property="Foreground" Value="#1A1F36"/>
-                                    <Setter Property="Padding" Value="18,0,0,0"/>
-                                    <Setter Property="VerticalAlignment" Value="Center"/>
-                                </Style>
-                            </DataGridTextColumn.ElementStyle>
-                        </DataGridTextColumn>
-                        <DataGridTextColumn Header="设计方法" Binding="{Binding DesignMethod}" Width="110"/>
-                        <DataGridTextColumn Header="进度" Binding="{Binding ProgressText}" Width="90"/>
-                        <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="80"/>
-                        <DataGridTextColumn Header="时间" Binding="{Binding CreatedTime, StringFormat={}{0:MM-dd HH:mm}}" Width="100"/>
-                    </DataGrid.Columns>
-                </DataGrid>
+                <!-- 有项目时显示列表 -->
+                <ItemsControl Grid.Row="1" ItemsSource="{Binding ProjectCards}"
+                              Visibility="{Binding HasProjects, Converter={StaticResource BoolToVis}}"
+                              Margin="12,8,12,12">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Background="#FAFBFC" CornerRadius="8" BorderBrush="#E8EAED" BorderThickness="1"
+                                    Padding="16,12" Margin="0,0,0,8" Cursor="Hand">
+                                <Border.InputBindings>
+                                    <MouseBinding MouseAction="LeftDoubleClick"
+                                                  Command="{Binding DataContext.ContinueProjectCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                  CommandParameter="{Binding ProjectId}"/>
+                                </Border.InputBindings>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- 阶段标签 -->
+                                    <Border Grid.Column="0" CornerRadius="4" Padding="8,3" VerticalAlignment="Center" Margin="0,0,12,0">
+                                        <Border.Background>
+                                            <SolidColorBrush Color="{Binding PhaseColor}" Opacity="0.15"/>
+                                        </Border.Background>
+                                        <TextBlock Text="{Binding PhaseText}" FontSize="10" FontWeight="SemiBold">
+                                            <TextBlock.Foreground>
+                                                <SolidColorBrush Color="{Binding PhaseColor}"/>
+                                            </TextBlock.Foreground>
+                                        </TextBlock>
+                                    </Border>
+
+                                    <!-- 项目信息 -->
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding ProjectName}" FontSize="13" FontWeight="SemiBold" Foreground="#1A1F36"/>
+                                        <TextBlock FontSize="11" Foreground="#8A8F9C" Margin="0,2,0,0">
+                                            <Run Text="{Binding SummaryText, Mode=OneWay}"/>
+                                            <Run Text=" · "/>
+                                            <Run Text="{Binding UpdatedTime, StringFormat='{}{0:MM-dd HH:mm}', Mode=OneWay}"/>
+                                        </TextBlock>
+                                    </StackPanel>
+
+                                    <!-- 最优值 -->
+                                    <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="12,0">
+                                        <TextBlock Text="最优" FontSize="9" Foreground="#A0A4B0" HorizontalAlignment="Center"/>
+                                        <TextBlock Text="{Binding BestValueText}" FontSize="16" FontWeight="Bold" Foreground="#0078D4" HorizontalAlignment="Center"/>
+                                    </StackPanel>
+
+                                    <!-- 继续按钮 -->
+                                    <Button Grid.Column="3" Content="继续优化 →" Padding="14,6"
+                                            Visibility="{Binding CanContinue, Converter={StaticResource BoolToVis}}"
+                                            Style="{StaticResource DOEOutlineBtn}" Foreground="#0078D4" FontSize="11"
+                                            Command="{Binding DataContext.ContinueProjectCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding ProjectId}"/>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- 无项目时显示引导 -->
+                <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Margin="0,40,0,40">
+                    <StackPanel.Style>
+                        <Style TargetType="StackPanel">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding HasProjects}" Value="False">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </StackPanel.Style>
+                    <TextBlock Text="📊" FontSize="40" HorizontalAlignment="Center" Margin="0,0,0,12"/>
+                    <TextBlock Text="还没有优化项目" FontSize="15" FontWeight="SemiBold" Foreground="#4A5066" HorizontalAlignment="Center"/>
+                    <TextBlock Text="点击上方「新建项目」开始您的第一个 DOE 优化" FontSize="12" Foreground="#8A8F9C" HorizontalAlignment="Center" Margin="0,4,0,16"/>
+                    <Button Content="新建项目" Style="{StaticResource DOEPrimaryBtn}" Padding="28,10"
+                            HorizontalAlignment="Center"
+                            Command="{Binding DataContext.CreateProjectCommand, RelativeSource={RelativeSource AncestorType=Window}}"/>
+                </StackPanel>
             </Grid>
         </Border>
-
     </DockPanel>
 </UserControl>

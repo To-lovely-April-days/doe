@@ -404,6 +404,29 @@ namespace MaxChemical.Modules.DOE.Services
                 BatchState = DOEBatchStatus.Completed;
                 await _repository.UpdateBatchStatusAsync(_currentBatchId, DOEBatchStatus.Completed);
                 NotifyBatchCompleted(DOEBatchStatus.Completed, stopReason ?? "所有实验组已执行完毕");
+
+                // ★ 新增: 项目模式下发布轮次完成事件，触发决策分析弹窗
+                if (_currentBatch?.BelongsToProject == true)
+                {
+                    try
+                    {
+                        _eventAggregator.GetEvent<DOERoundCompletedEvent>().Publish(
+                            new DOERoundCompletedPayload
+                            {
+                                ProjectId = _currentBatch.ProjectId!,
+                                BatchId = _currentBatchId,
+                                RoundNumber = _currentBatch.RoundNumber ?? 0,
+                                FinalStatus = DOEBatchStatus.Completed
+                            });
+                        _logger.LogInformation(
+                            "项目轮次完成事件已发布: Project={ProjectId}, Round={Round}",
+                            _currentBatch.ProjectId, _currentBatch.RoundNumber);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "发布项目轮次完成事件失败（不影响批次完成）");
+                    }
+                }
             }
             catch (OperationCanceledException)
             {

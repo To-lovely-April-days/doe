@@ -1154,7 +1154,314 @@ class DOEDesigner:
                 best_idx = list(idx)
         
         return best_idx if best_idx is not None else list(range(num_runs))
+# ═══════════════════════════════════════════════════════
+    # ★ 新增: 项目迭代专用设计方法
+    # augment_design / steepest_ascent / confirmation_runs
+    # ═══════════════════════════════════════════════════════
 
+    def augment_design(self, factors_json: str, existing_matrix_json: str,
+                       num_additional: int = -1, model_type: str = "quadratic") -> str:
+        """
+        ★ 新增: 增强设计 — 在已有实验数据基础上补充新实验点
+
+        核心思想:
+          把已有实验点锁定为"必选点"，然后在候选集中用 Fedorov 交换算法
+          选出额外的点，使得 "已有 + 新增" 组合后的信息矩阵 |X'X| 最大。
+
+        应用场景:
+          - 一轮 RSM 做完但模型 R² 不够 → 补点改善模型
+          - 因子范围扩展后 → 在新区域补充采样
+          - Power 不够 → 增加实验次数提升统计功效
+
+        factors_json: 因子定义（与 d_optimal 格式相同）
+        existing_matrix_json: 已有实验点 JSON
+        num_additional: 需要补充的实验数，-1 自动（= 缺失自由度数 × 1.5）
+        model_type: "linear" / "interaction" / "quadratic"
+
+        返回: 仅新增点的矩阵 JSON（不含已有点）
+        """
+        factors = json.loads(factors_json)
+        existing = json.loads(existing_matrix_json)
+
+        continuous, categorical = self._separate_factors(factors)
+        k_cont = len(continuous)
+        k_cat = len(categorical)
+
+        if k_cont == 0 and k_cat == 0:
+            return json.dumps([])
+
+        # ── 构建候选集（与 d_optimal 相同）──
+        grid_levels = 5
+
+        if k_cont > 0:
+            cont_grid = self._generate_candidate_grid(k_cont, grid_levels)
+        else:
+            cont_grid = np.array([[]])
+
+        if k_cat > 0:
+            cat_levels_list = [f["levels"] for f in categorical]
+            cat_combos = list(iterproduct(*cat_levels_list))
+            cat_dummy_counts = [len(levels) - 1 for levels in cat_levels_list]
+        else:
+            cat_combos = [()]
+            cat_levels_list = []
+            cat_dummy_counts = []
+
+        # 构建完整候选集: 连续网格 × 类别组合
+        full_candidates = []
+        expanded_rows = []
+
+        for cont_row in cont_grid:
+            for cat_combo in cat_combos:
+                full_candidates.append((cont_row, cat_combo))
+                row = list(cont_row) if k_cont > 0 else []
+                for ci in range(k_cat):
+                    levels = cat_levels_list[ci]
+                    for lv_idx in range(1, len(levels)):
+                        row.append(1.0 if cat_combo[ci] == levels[lv_idx] else 0.0)
+                expanded_rows.append(row)
+
+        X_expanded = np.array(expanded_rows) if expanded_rows else np.empty((0, 0))
+
+        if k_cat > 0 and X_expanded.shape[0] > 0:
+            X_model_cand = self._build_full_model_matrix(
+                X_expanded, k_cont, cat_dummy_counts, model_type)
+        elif X_expanded.shape[0] > 0:
+            X_model_cand = self._build_model_matrix(X_expanded, model_type)
+        else:
+            return json.dumps([])
+
+        # ── 编码已有实验点 ──
+        existing_expanded = []
+        for ex_row in existing:
+            coded = []
+            for f in continuous:
+                center = (f["lower"] + f["upper"]) / 2.0
+                half_range = (f["upper"] - f["lower"]) / 2.0
+                val = ex_row.get(f["name"], center)
+                coded.append((float(val) - center) / half_range if half_range > 0 else 0.0)
+            for f in categorical:
+                val = ex_row.get(f["name"], f["levels"][0])
+                for lv_idx in range(1, len(f["levels"])):
+                    coded.append(1.0 if val == f["levels"][lv_idx] else 0.0)
+            existing_expanded.append(coded)
+
+        n_existing = len(existing)
+
+        if n_existing > 0 and len(existing_expanded[0]) > 0:
+            X_existing = np.array(existing_expanded)
+            if k_cat > 0:
+                X_model_existing = self._build_full_model_matrix(
+                    X_existing, k_cont, cat_dummy_counts, model_type)
+            else:
+                X_model_existing = self._build_model_matrix(X_existing, model_type)
+        else:
+            X_model_existing = np.empty((0, X_model_cand.shape[1]))
+
+        p = X_model_cand.shape[1]
+
+        # ── 自动确定补充数量 ──
+        if num_additional < 0:
+            df_needed = max(p - n_existing + 2, 0)
+            num_additional = max(int(np.ceil(df_needed * 1.5)), 3)
+
+        num_additional = min(num_additional, len(full_candidates))
+        if num_additional <= 0:
+            return json.dumps([])
+
+        # ── Fedorov 交换: 锁定已有点，只交换新增点 ──
+        N_cand = len(full_candidates)
+        best_det = -np.inf
+        best_new_idx = None
+        n_starts = min(max(5, p), 20)
+
+        for _ in range(n_starts):
+            new_idx = list(np.random.choice(N_cand, size=num_additional, replace=False))
+            new_set = set(new_idx)
+
+            improved = True
+            max_iter = 30
+            iter_count = 0
+
+            while improved and iter_count < max_iter:
+                improved = False
+                iter_count += 1
+
+                for i in range(num_additional):
+                    X_new = X_model_cand[new_idx]
+                    X_combined = np.vstack([X_model_existing, X_new]) if n_existing > 0 else X_new
+
+                    try:
+                        current_det = np.linalg.det(X_combined.T @ X_combined)
+                    except np.linalg.LinAlgError:
+                        current_det = 0.0
+
+                    old_cand = new_idx[i]
+                    best_swap_det = current_det
+                    best_swap = old_cand
+
+                    for c in range(N_cand):
+                        if c in new_set:
+                            continue
+                        new_idx[i] = c
+                        X_new_test = X_model_cand[new_idx]
+                        X_test = np.vstack([X_model_existing, X_new_test]) if n_existing > 0 else X_new_test
+                        try:
+                            test_det = np.linalg.det(X_test.T @ X_test)
+                        except np.linalg.LinAlgError:
+                            test_det = 0.0
+
+                        if test_det > best_swap_det * 1.001:
+                            best_swap_det = test_det
+                            best_swap = c
+
+                    if best_swap != old_cand:
+                        new_set.discard(old_cand)
+                        new_set.add(best_swap)
+                        new_idx[i] = best_swap
+                        improved = True
+                    else:
+                        new_idx[i] = old_cand
+
+            # 计算最终行列式
+            X_new_final = X_model_cand[new_idx]
+            X_final = np.vstack([X_model_existing, X_new_final]) if n_existing > 0 else X_new_final
+            try:
+                final_det = np.linalg.det(X_final.T @ X_final)
+            except np.linalg.LinAlgError:
+                final_det = 0.0
+
+            if final_det > best_det:
+                best_det = final_det
+                best_new_idx = list(new_idx)
+
+        # ── 解码新增点 ──
+        new_matrix = []
+        if best_new_idx:
+            for idx in best_new_idx:
+                cont_row, cat_combo = full_candidates[idx]
+                decoded = {}
+                for i, f in enumerate(continuous):
+                    center = (f["lower"] + f["upper"]) / 2.0
+                    half_range = (f["upper"] - f["lower"]) / 2.0
+                    decoded[f["name"]] = round(center + float(cont_row[i]) * half_range, 6)
+                for i, f in enumerate(categorical):
+                    decoded[f["name"]] = cat_combo[i]
+                new_matrix.append(decoded)
+
+        return json.dumps(new_matrix, ensure_ascii=False)
+
+    def steepest_ascent(self, factors_json: str, coefficients_json: str,
+                        step_count: int = 5, step_multiplier: float = 1.0,
+                        descend: bool = False) -> str:
+        """
+        ★ 新增: 最速上升/下降法 — 沿一阶模型梯度方向生成实验点
+
+        数学原理:
+          给定一阶模型 y = β₀ + Σβᵢxᵢ
+          最速上升方向: Δxᵢ ∝ βᵢ（各因子步长与系数成正比）
+          选一个参考因子（系数最大的），固定其步长 = 1 个步长单位
+          其余因子按系数比例缩放
+
+        factors_json: 因子定义（含 lower, upper）
+        coefficients_json: 一阶模型系数
+          格式: {"温度": 12.5, "压力": -3.2, "催化剂": 8.1}
+          不含截距，只有主效应系数
+        step_count: 沿梯度方向的步数
+        step_multiplier: 步长缩放因子（1.0 = 默认步长，0.5 = 半步长）
+        descend: True = 最速下降（最小化目标时使用）
+
+        返回: 实验点矩阵 JSON（从中心点出发，依次沿梯度方向）
+        """
+        factors = json.loads(factors_json)
+        coefficients = json.loads(coefficients_json)
+
+        continuous, categorical = self._separate_factors(factors)
+        if len(continuous) == 0:
+            return json.dumps([])
+
+        # 提取连续因子的系数
+        cont_names = [f["name"] for f in continuous]
+        betas = np.array([coefficients.get(name, 0.0) for name in cont_names])
+
+        if np.all(np.abs(betas) < 1e-10):
+            return json.dumps([])  # 所有系数为零，无法确定方向
+
+        # 如果是下降，取反
+        if descend:
+            betas = -betas
+
+        # 参考因子: 系数绝对值最大的
+        ref_idx = np.argmax(np.abs(betas))
+        ref_beta = betas[ref_idx]
+
+        # 各因子的步长比例（相对参考因子）
+        step_ratios = betas / ref_beta if abs(ref_beta) > 1e-10 else np.zeros_like(betas)
+
+        # 参考因子的步长 = 范围的 20% × step_multiplier
+        ref_factor = continuous[ref_idx]
+        ref_range = ref_factor["upper"] - ref_factor["lower"]
+        base_step = ref_range * 0.2 * step_multiplier
+
+        # 中心点
+        centers = [(f["lower"] + f["upper"]) / 2.0 for f in continuous]
+
+        # 生成实验点
+        matrix = []
+        for step in range(1, step_count + 1):
+            row = {}
+            for i, f in enumerate(continuous):
+                val = centers[i] + step * base_step * step_ratios[i]
+                # 裁剪到因子范围
+                val = max(f["lower"], min(f["upper"], val))
+                row[f["name"]] = round(val, 6)
+            matrix.append(row)
+
+        # 补充类别因子（取第一个水平）
+        if categorical:
+            matrix = self._cross_with_categorical(matrix, categorical)
+
+        return json.dumps(matrix, ensure_ascii=False)
+
+    def confirmation_runs(self, optimal_factors_json: str, factors_json: str,
+                          repeat_count: int = 5, perturbation: float = 0.0) -> str:
+        """
+        ★ 新增: 验证实验 — 在预测最优点（及其邻域）生成重复实验
+
+        optimal_factors_json: 预测最优因子组合，如 {"温度": 135, "压力": 22}
+        factors_json: 因子定义（用于确定扰动范围）
+        repeat_count: 重复次数（推荐 3-5 次）
+        perturbation: 扰动幅度（0.0 = 纯重复，0.05 = ±5% 范围内随机扰动）
+
+        返回: 验证实验矩阵 JSON
+        """
+        optimal = json.loads(optimal_factors_json)
+        factors = json.loads(factors_json)
+
+        continuous, categorical = self._separate_factors(factors)
+
+        matrix = []
+
+        if perturbation <= 0:
+            # 纯重复: 同一点做 repeat_count 次
+            for _ in range(repeat_count):
+                matrix.append(dict(optimal))
+        else:
+            # 带扰动: 在最优点附近随机采样
+            rng = np.random.RandomState(42)
+            for _ in range(repeat_count):
+                row = dict(optimal)
+                for f in continuous:
+                    name = f["name"]
+                    center = optimal.get(name, (f["lower"] + f["upper"]) / 2.0)
+                    half_range = (f["upper"] - f["lower"]) / 2.0
+                    noise = rng.uniform(-perturbation, perturbation) * half_range
+                    val = center + noise
+                    val = max(f["lower"], min(f["upper"], val))
+                    row[name] = round(val, 6)
+                matrix.append(row)
+
+        return json.dumps(matrix, ensure_ascii=False)
 
 # ═══════════════════════════════════════════════════════
 # DOEDataImporter — 历史数据导入（保留不变）

@@ -31,7 +31,8 @@ namespace MaxChemical.Modules.DOE
             containerRegistry.RegisterSingleton<DOEExportService>();
             containerRegistry.RegisterSingleton<IDesirabilityService, DesirabilityService>();
             containerRegistry.RegisterSingleton<IModelRouter, ModelRouter>();
-
+            // ═══ 项目层服务 ═══
+            ProjectServiceRegistration.RegisterProjectServices(containerRegistry);
             // ViewModel
             containerRegistry.Register<DOEMainViewModel>();
             containerRegistry.Register<DOEOverviewViewModel>();

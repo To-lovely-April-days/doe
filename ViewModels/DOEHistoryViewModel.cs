@@ -15,7 +15,12 @@ using Prism.Mvvm;
 namespace MaxChemical.Modules.DOE.ViewModels
 {
     /// <summary>
-    /// DOE 历史管理 ViewModel — 批次浏览、详情、复用方案、对比、GPR 模型管理、Excel 导出
+    /// DOE 历史管理 ViewModel — 项目模式
+    /// 
+    /// ★ 重写: 从批次平铺改为 项目列表 → 展开轮次 两级结构
+    /// 
+    /// 左侧: 项目列表（含状态、阶段、最优值）
+    /// 右侧: 选中项目的轮次列表 + 轮次详情 + 轮次总结
     /// </summary>
     public class DOEHistoryViewModel : BindableBase
     {
@@ -26,9 +31,18 @@ namespace MaxChemical.Modules.DOE.ViewModels
         private readonly IDialogService _dialogService;
         private readonly ILogService _logger;
 
-        private ObservableCollection<DOEBatchSummary> _batches = new();
-        private DOEBatchSummary? _selectedBatch;
-        private DOEBatch? _batchDetail;
+        // ── 项目列表（左侧）──
+        private ObservableCollection<DOEProjectSummary> _projects = new();
+        private DOEProjectSummary? _selectedProject;
+
+        // ── 轮次列表（右侧）──
+        private ObservableCollection<RoundListItem> _rounds = new();
+        private RoundListItem? _selectedRound;
+        private DOEBatch? _roundDetail;
+
+        // ── 轮次总结 ──
+        private DOERoundSummary? _roundSummary;
+
         private bool _isLoading;
         private string _statusMessage = "";
 
@@ -52,83 +66,105 @@ namespace MaxChemical.Modules.DOE.ViewModels
             _dialogService = dialogService;
             _logger = logger?.ForContext<DOEHistoryViewModel>() ?? throw new ArgumentNullException(nameof(logger));
 
-            RefreshCommand = new DelegateCommand(async () => await LoadBatchesAsync());
-            ViewDetailCommand = new DelegateCommand<DOEBatchSummary>(async s => await ViewBatchDetailAsync(s));
-            DeleteBatchCommand = new DelegateCommand<DOEBatchSummary>(async s => await DeleteBatchAsync(s));
-            ExportBatchCommand = new DelegateCommand<DOEBatchSummary>(async s => await ExportBatchAsync(s));
-            ExportComparisonCommand = new DelegateCommand(async () => await ExportComparisonAsync(), () => Batches.Count >= 2);
-            EditBatchCommand = new DelegateCommand<DOEBatchSummary>(s => EditBatch(s));  //  新增
-            ResetGPRModelCommand = new DelegateCommand(async () => await ResetGPRModelAsync());
-            RetrainGPRModelCommand = new DelegateCommand(async () => await RetrainGPRModelAsync());
+            RefreshCommand = new DelegateCommand(async () => await LoadProjectsAsync());
+            DeleteProjectCommand = new DelegateCommand<DOEProjectSummary>(async s => await DeleteProjectAsync(s));
+            DeleteRoundCommand = new DelegateCommand<RoundListItem>(async r => await DeleteRoundAsync(r));
+            ExportRoundCommand = new DelegateCommand<RoundListItem>(async r => await ExportRoundAsync(r));
+            NavigateToExecutionCommand = new DelegateCommand(
+                () => { if (_selectedRound != null) RequestExecuteBatch?.Invoke(this, _selectedRound.BatchId); },
+                () => _selectedRound != null);
+            NavigateToAnalysisCommand = new DelegateCommand(
+                () => { if (_selectedRound != null) RequestAnalyzeBatch?.Invoke(this, _selectedRound.BatchId); },
+                () => _selectedRound != null);
 
             // 初始加载
-            _ = LoadBatchesAsync();
+            _ = LoadProjectsAsync();
         }
 
         // ══════════════ Properties ══════════════
 
-        public ObservableCollection<DOEBatchSummary> Batches { get => _batches; set => SetProperty(ref _batches, value); }
-        public DOEBatchSummary? SelectedBatch { get => _selectedBatch; set { SetProperty(ref _selectedBatch, value); _ = OnSelectedBatchChanged(); } }
-        public DOEBatch? BatchDetail { get => _batchDetail; set => SetProperty(ref _batchDetail, value); }
+        // 项目列表
+        public ObservableCollection<DOEProjectSummary> Projects { get => _projects; set => SetProperty(ref _projects, value); }
+        public DOEProjectSummary? SelectedProject
+        {
+            get => _selectedProject;
+            set { SetProperty(ref _selectedProject, value); _ = OnSelectedProjectChangedAsync(); }
+        }
+
+        // 轮次列表
+        public ObservableCollection<RoundListItem> Rounds { get => _rounds; set => SetProperty(ref _rounds, value); }
+        public RoundListItem? SelectedRound
+        {
+            get => _selectedRound;
+            set
+            {
+                SetProperty(ref _selectedRound, value);
+                _ = OnSelectedRoundChangedAsync();
+                NavigateToExecutionCommand.RaiseCanExecuteChanged();
+                NavigateToAnalysisCommand.RaiseCanExecuteChanged();
+            }
+        }
+
+        // 轮次详情
+        public DOEBatch? RoundDetail { get => _roundDetail; set => SetProperty(ref _roundDetail, value); }
+        public DOERoundSummary? RoundSummary { get => _roundSummary; set => SetProperty(ref _roundSummary, value); }
+
         public bool IsLoading { get => _isLoading; set => SetProperty(ref _isLoading, value); }
         public string StatusMessage { get => _statusMessage; set => SetProperty(ref _statusMessage, value); }
         public string GPRStatusText { get => _gprStatusText; set => SetProperty(ref _gprStatusText, value); }
         public bool GPRIsActive { get => _gprIsActive; set => SetProperty(ref _gprIsActive, value); }
         public int GPRDataCount { get => _gprDataCount; set => SetProperty(ref _gprDataCount, value); }
 
+        /// <summary>是否有选中的项目（控制右侧面板显示）</summary>
+        public bool HasSelectedProject => SelectedProject != null;
+
+        /// <summary>是否有轮次总结（控制总结面板显示）</summary>
+        public bool HasRoundSummary => RoundSummary != null;
+
         // ══════════════ Commands ══════════════
 
         public DelegateCommand RefreshCommand { get; }
-        public DelegateCommand<DOEBatchSummary> ViewDetailCommand { get; }
-        public DelegateCommand<DOEBatchSummary> DeleteBatchCommand { get; }
-        public DelegateCommand<DOEBatchSummary> ExportBatchCommand { get; }
-        public DelegateCommand ExportComparisonCommand { get; }
-        public DelegateCommand<DOEBatchSummary> EditBatchCommand { get; }  //  新增
-        public DelegateCommand ResetGPRModelCommand { get; }
-        public DelegateCommand RetrainGPRModelCommand { get; }
+        public DelegateCommand<DOEProjectSummary> DeleteProjectCommand { get; }
+        public DelegateCommand<RoundListItem> DeleteRoundCommand { get; }
+        public DelegateCommand<RoundListItem> ExportRoundCommand { get; }
+        public DelegateCommand NavigateToExecutionCommand { get; }
+        public DelegateCommand NavigateToAnalysisCommand { get; }
 
-        /// <summary>
-        /// 请求打开设计向导（复用方案）事件
-        /// </summary>
-        public event EventHandler<string>? RequestReuseBatch;
+        // ══════════════ Events ══════════════
 
-        /// <summary>
-        /// 请求打开执行仪表盘事件
-        /// </summary>
         public event EventHandler<string>? RequestExecuteBatch;
-
-        /// <summary>
-        /// 请求打开分析视图事件
-        /// </summary>
         public event EventHandler<string>? RequestAnalyzeBatch;
-
-        /// <summary>
-        ///  请求编辑方案事件（历史页右键菜单触发）
-        /// </summary>
-        public event EventHandler<string>? RequestEditBatch;
 
         // ══════════════ 加载 ══════════════
 
-        public async Task LoadBatchesAsync()
+        /// <summary>加载项目列表（原 LoadBatchesAsync 重写）</summary>
+        public async Task LoadProjectsAsync()
         {
             try
             {
                 IsLoading = true;
+                var projects = await _repository.GetAllProjectSummariesAsync(50);
+                Projects = new ObservableCollection<DOEProjectSummary>(projects);
+                StatusMessage = $"共 {projects.Count} 个项目";
 
-                //  直接查所有批次的摘要（不依赖 FlowId）
-                var summaries = await _repository.GetAllBatchSummariesAsync(50);
-
-                Batches = new ObservableCollection<DOEBatchSummary>(summaries);
-                StatusMessage = $"共 {summaries.Count} 个 DOE 批次";
-                ExportComparisonCommand.RaiseCanExecuteChanged();
-
-                // 加载 GPR 模型状态
+                // GPR 状态
                 var flowId = _paramProvider.GetCurrentFlowId();
-                await LoadGPRStatusAsync(flowId);
+                if (!string.IsNullOrEmpty(flowId))
+                {
+                    var state = await _repository.GetGPRModelStateAsync(flowId);
+                    if (state != null)
+                    {
+                        GPRIsActive = state.IsActive;
+                        GPRDataCount = state.DataCount;
+                        GPRStatusText = state.IsActive
+                            ? $"已激活 | R²={state.RSquared:F3} | {state.DataCount} 组数据"
+                            : $"未激活 | {state.DataCount} 组数据";
+                    }
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "加载批次列表失败");
+                _logger.LogError(ex, "加载项目列表失败");
                 StatusMessage = $"加载失败: {ex.Message}";
             }
             finally
@@ -137,111 +173,179 @@ namespace MaxChemical.Modules.DOE.ViewModels
             }
         }
 
-        private async Task OnSelectedBatchChanged()
-        {
-            if (SelectedBatch == null) { BatchDetail = null; return; }
-            await ViewBatchDetailAsync(SelectedBatch);
-        }
+        /// <summary>兼容旧调用点（DOEMainView.xaml.cs 中 case 3 调用的）</summary>
+        public async Task LoadBatchesAsync() => await LoadProjectsAsync();
 
-        private async Task ViewBatchDetailAsync(DOEBatchSummary? summary)
+        private async Task OnSelectedProjectChangedAsync()
         {
-            if (summary == null) return;
+            RaisePropertyChanged(nameof(HasSelectedProject));
+            RoundDetail = null;
+            RoundSummary = null;
+            RaisePropertyChanged(nameof(HasRoundSummary));
+
+            if (SelectedProject == null)
+            {
+                Rounds = new ObservableCollection<RoundListItem>();
+                return;
+            }
+
             try
             {
-                BatchDetail = await _repository.GetBatchWithDetailsAsync(summary.BatchId);
+                IsLoading = true;
+                var batches = await _repository.GetBatchesByProjectAsync(SelectedProject.ProjectId);
+                var summaries = await _repository.GetRoundSummariesAsync(SelectedProject.ProjectId);
+
+                // ★ 修复: 为每个批次查询 Runs 统计（GetBatchesByProjectAsync 不含 Runs）
+                var roundItems = new List<RoundListItem>();
+                foreach (var b in batches)
+                {
+                    var summary = summaries.FirstOrDefault(s => s.BatchId == b.BatchId);
+
+                    // 查询该批次的 Runs 统计
+                    int totalRuns = 0;
+                    int completedRuns = 0;
+                    try
+                    {
+                        var runs = await _repository.GetRunsAsync(b.BatchId);
+                        totalRuns = runs.Count;
+                        completedRuns = runs.Count(r => r.Status == DOERunStatus.Completed);
+                    }
+                    catch { }
+
+                    roundItems.Add(new RoundListItem
+                    {
+                        BatchId = b.BatchId,
+                        BatchName = b.BatchName,
+                        RoundNumber = b.RoundNumber ?? 0,
+                        Phase = b.ProjectPhase ?? DOEProjectPhase.Screening,
+                        PhaseText = (b.ProjectPhase ?? DOEProjectPhase.Screening) switch
+                        {
+                            DOEProjectPhase.Screening => "筛选",
+                            DOEProjectPhase.PathSearch => "爬坡",
+                            DOEProjectPhase.RSM => "RSM",
+                            DOEProjectPhase.Augmenting => "补点",
+                            DOEProjectPhase.Confirmation => "验证",
+                            _ => b.ProjectPhase?.ToString() ?? ""
+                        },
+                        DesignMethod = b.DesignMethod,
+                        DesignMethodText = b.DesignMethod switch
+                        {
+                            DOEDesignMethod.CCD => "CCD",
+                            DOEDesignMethod.BoxBehnken => "BBD",
+                            DOEDesignMethod.DOptimal => "D-Optimal",
+                            DOEDesignMethod.FullFactorial => "全因子",
+                            DOEDesignMethod.FractionalFactorial => "部分因子",
+                            DOEDesignMethod.Taguchi => "Taguchi",
+                            DOEDesignMethod.SteepestAscent => "最速上升",
+                            DOEDesignMethod.AugmentedDesign => "增强设计",
+                            DOEDesignMethod.ConfirmationRuns => "验证实验",
+                            _ => b.DesignMethod.ToString()
+                        },
+                        Status = b.Status,
+                        TotalRuns = totalRuns,
+                        CompletedRuns = completedRuns,
+                        ProgressText = $"{completedRuns}/{totalRuns}",
+                        RSquared = summary?.RSquared,
+                        RSquaredText = summary?.RSquared.HasValue == true ? $"R²={summary.RSquared:F3}" : "",
+                        Recommendation = summary?.RecommendationReason ?? "",
+                        CreatedTime = b.CreatedTime
+                    });
+                }
+
+                Rounds = new ObservableCollection<RoundListItem>(roundItems);
+                StatusMessage = $"项目 \"{SelectedProject.ProjectName}\" — {roundItems.Count} 轮";
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "加载批次详情失败: {BatchId}", summary.BatchId);
+                _logger.LogError(ex, "加载项目轮次失败");
+            }
+            finally
+            {
+                IsLoading = false;
+            }
+        }
+
+        private async Task OnSelectedRoundChangedAsync()
+        {
+            RoundSummary = null;
+            RaisePropertyChanged(nameof(HasRoundSummary));
+
+            if (_selectedRound == null)
+            {
+                RoundDetail = null;
+                return;
+            }
+
+            try
+            {
+                RoundDetail = await _repository.GetBatchWithDetailsAsync(_selectedRound.BatchId);
+                RoundSummary = await _repository.GetRoundSummaryByBatchAsync(_selectedRound.BatchId);
+                RaisePropertyChanged(nameof(HasRoundSummary));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "加载轮次详情失败");
             }
         }
 
         // ══════════════ 操作 ══════════════
 
-        /// <summary>
-        ///  编辑方案（仅 Ready 状态）
-        /// </summary>
-        private void EditBatch(DOEBatchSummary? summary)
+        private async Task DeleteProjectAsync(DOEProjectSummary? project)
         {
-            if (summary == null) return;
-
-            if (summary.Status != DOEBatchStatus.Ready)
-            {
-                _dialogService.ShowError("只有「就绪」状态的方案才能编辑。\n已执行或已完成的方案不可修改。", "无法编辑");
-                return;
-            }
-
-            RequestEditBatch?.Invoke(this, summary.BatchId);
-        }
-
-        /// <summary>
-        ///  删除方案（带 GPR 模型同步清理）
-        /// </summary>
-        private async Task DeleteBatchAsync(DOEBatchSummary? summary)
-        {
-            if (summary == null) return;
-            if (!_dialogService.ShowConfirmation($"确定删除批次 '{summary.BatchName}'？\n此操作不可恢复。", "删除确认"))
+            if (project == null) return;
+            if (!_dialogService.ShowConfirmation(
+                $"确定删除项目 \"{project.ProjectName}\"？\n" +
+                $"该项目包含 {project.TotalBatches} 轮、{project.TotalExperiments} 组实验数据。\n" +
+                $"项目下的批次将被解除关联（不删除实验数据）。\n\n此操作不可恢复。",
+                "删除项目"))
                 return;
 
             try
             {
-                // 获取方案的因子信息（用于判断模型关联）
-                var batch = await _repository.GetBatchWithDetailsAsync(summary.BatchId);
-                string? flowId = batch?.FlowId;
-                string? signature = null;
+                await _repository.DeleteProjectWithChildrenAsync(project.ProjectId);
+                Projects.Remove(project);
+                StatusMessage = $"已删除项目: {project.ProjectName}";
 
-                if (batch?.Factors?.Count > 0)
+                if (SelectedProject?.ProjectId == project.ProjectId)
                 {
-                    var factorNames = batch.Factors.Select(f => f.FactorName);
-                    signature = GPRModelState.BuildSignature(factorNames);
+                    SelectedProject = null;
+                    Rounds.Clear();
                 }
-
-                // 删除批次及所有子表
-                await _repository.DeleteBatchWithChildrenAsync(summary.BatchId);
-                Batches.Remove(summary);
-                StatusMessage = $"已删除批次: {summary.BatchName}";
-
-                //  GPR 模型同步清理逻辑
-                if (!string.IsNullOrEmpty(flowId) && !string.IsNullOrEmpty(signature))
-                {
-                    var remaining = await _repository.GetBatchCountBySignatureAsync(flowId, signature);
-
-                    if (remaining == 0)
-                    {
-                        // 该签名下没有其他方案了，询问用户是否删除模型
-                        var state = await _repository.GetGPRModelStateAsync(flowId, signature);
-                        if (state != null)
-                        {
-                            var deleteModel = _dialogService.ShowConfirmation(
-                                $"该方案关联的 GPR 模型（{state.ModelName}，{state.DataCount} 组数据）\n" +
-                                $"不再被任何方案使用。是否一并删除？\n\n" +
-                                $"选择「否」将保留模型数据以备后用。",
-                                "清理关联模型");
-
-                            if (deleteModel)
-                            {
-                                await _repository.DeleteGPRModelAsync(state.Id);
-                                StatusMessage += "，已删除关联 GPR 模型";
-                                _logger.LogInformation("已删除孤立 GPR 模型: {ModelName}, Sig={Sig}", state.ModelName, signature);
-                            }
-                        }
-                    }
-                }
-
-                await LoadGPRStatusAsync(flowId);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "删除批次失败");
+                _logger.LogError(ex, "删除项目失败");
                 _dialogService.ShowError($"删除失败: {ex.Message}", "错误");
             }
         }
 
-        private async Task ExportBatchAsync(DOEBatchSummary? summary)
+        private async Task DeleteRoundAsync(RoundListItem? round)
         {
-            if (summary == null) return;
+            if (round == null || SelectedProject == null) return;
+            if (!_dialogService.ShowConfirmation(
+                $"确定删除第 {round.RoundNumber} 轮 \"{round.BatchName}\"？\n此操作不可恢复。",
+                "删除轮次"))
+                return;
 
-            var path = _dialogService.ShowSaveFileDialog($"DOE报告_{summary.BatchName}_{DateTime.Now:yyyyMMdd}.xlsx",
+            try
+            {
+                await _repository.DeleteBatchWithChildrenAsync(round.BatchId);
+                Rounds.Remove(round);
+                StatusMessage = $"已删除轮次: {round.BatchName}";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "删除轮次失败");
+                _dialogService.ShowError($"删除失败: {ex.Message}", "错误");
+            }
+        }
+
+        private async Task ExportRoundAsync(RoundListItem? round)
+        {
+            if (round == null) return;
+
+            var path = _dialogService.ShowSaveFileDialog(
+                $"DOE报告_{round.BatchName}_{DateTime.Now:yyyyMMdd}.xlsx",
                 "Excel 文件|*.xlsx");
             if (string.IsNullOrEmpty(path)) return;
 
@@ -249,7 +353,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 IsLoading = true;
                 StatusMessage = "正在导出报告...";
-                await _exportService.ExportBatchReportAsync(summary.BatchId, path);
+                await _exportService.ExportBatchReportAsync(round.BatchId, path);
                 StatusMessage = $"报告已导出: {path}";
                 _dialogService.ShowInfo($"DOE 报告已导出至:\n{path}", "导出成功");
             }
@@ -263,114 +367,38 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 IsLoading = false;
             }
         }
+    }
 
-        private async Task ExportComparisonAsync()
+    /// <summary>
+    /// 轮次列表项（历史页右侧列表绑定）
+    /// </summary>
+    public class RoundListItem
+    {
+        public string BatchId { get; set; } = "";
+        public string BatchName { get; set; } = "";
+        public int RoundNumber { get; set; }
+        public DOEProjectPhase Phase { get; set; }
+        public string PhaseText { get; set; } = "";
+        public DOEDesignMethod DesignMethod { get; set; }
+        public string DesignMethodText { get; set; } = "";
+        public DOEBatchStatus Status { get; set; }
+        public int TotalRuns { get; set; }
+        public int CompletedRuns { get; set; }
+        public string ProgressText { get; set; } = "";
+        public double? RSquared { get; set; }
+        public string RSquaredText { get; set; } = "";
+        public string Recommendation { get; set; } = "";
+        public DateTime CreatedTime { get; set; }
+
+        /// <summary>状态显示文本</summary>
+        public string StatusText => Status switch
         {
-            var path = _dialogService.ShowSaveFileDialog($"DOE批次对比_{DateTime.Now:yyyyMMdd}.xlsx", "Excel 文件|*.xlsx");
-            if (string.IsNullOrEmpty(path)) return;
-
-            try
-            {
-                IsLoading = true;
-                var batchIds = Batches.Select(b => b.BatchId).ToList();
-                await _exportService.ExportComparisonReportAsync(batchIds, path);
-                StatusMessage = $"对比报告已导出: {path}";
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "导出对比报告失败");
-            }
-            finally
-            {
-                IsLoading = false;
-            }
-        }
-
-        // ══════════════ GPR 模型管理 ══════════════
-
-        private async Task LoadGPRStatusAsync(string? flowId)
-        {
-            if (string.IsNullOrEmpty(flowId))
-            {
-                GPRStatusText = "未选择流程";
-                return;
-            }
-
-            try
-            {
-                var state = await _repository.GetGPRModelStateAsync(flowId);
-                if (state != null)
-                {
-                    GPRIsActive = state.IsActive;
-                    GPRDataCount = state.DataCount;
-                    GPRStatusText = state.IsActive
-                        ? $"已激活 | 数据量: {state.DataCount} | R²: {state.RSquared:F4} | 上次训练: {state.LastTrainedTime:HH:mm}"
-                        : $"未激活 | 数据量: {state.DataCount}/{6}（冷启动阈值）";
-                }
-                else
-                {
-                    GPRStatusText = "无模型记录";
-                    GPRIsActive = false;
-                    GPRDataCount = 0;
-                }
-            }
-            catch (Exception ex)
-            {
-                GPRStatusText = $"加载失败: {ex.Message}";
-            }
-        }
-
-        private async Task ResetGPRModelAsync()
-        {
-            var flowId = _paramProvider.GetCurrentFlowId();
-            if (string.IsNullOrEmpty(flowId)) return;
-
-            if (!_dialogService.ShowConfirmation("重置 GPR 模型将清除所有训练数据和模型状态，确定继续？", "重置确认"))
-                return;
-
-            try
-            {
-                await _gprService.ResetModelAsync(flowId, keepData: false);
-                await LoadGPRStatusAsync(flowId);
-                StatusMessage = "GPR 模型已重置";
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "重置 GPR 模型失败");
-            }
-        }
-
-        private async Task RetrainGPRModelAsync()
-        {
-            var flowId = _paramProvider.GetCurrentFlowId();
-            if (string.IsNullOrEmpty(flowId)) return;
-
-            try
-            {
-                IsLoading = true;
-                StatusMessage = "正在重新训练 GPR 模型...";
-
-                // 重置模型但保留数据
-                await _gprService.ResetModelAsync(flowId, keepData: true);
-
-                // 重新训练
-                var result = await _gprService.TrainModelAsync();
-                await _gprService.SaveStateAsync(flowId);
-                await LoadGPRStatusAsync(flowId);
-
-                StatusMessage = result.IsActive
-                    ? $"重新训练完成: R²={result.RSquared:F4}, RMSE={result.RMSE:F4}"
-                    : "数据量不足，模型未激活";
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "重新训练 GPR 模型失败");
-                StatusMessage = $"训练失败: {ex.Message}";
-            }
-            finally
-            {
-                IsLoading = false;
-            }
-        }
+            DOEBatchStatus.Ready => "就绪",
+            DOEBatchStatus.Running => "执行中",
+            DOEBatchStatus.Paused => "已暂停",
+            DOEBatchStatus.Completed => "已完成",
+            DOEBatchStatus.Aborted => "已中止",
+            _ => Status.ToString()
+        };
     }
 }

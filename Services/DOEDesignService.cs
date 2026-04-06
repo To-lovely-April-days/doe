@@ -15,7 +15,7 @@ namespace MaxChemical.Modules.DOE.Services
     /// 
     ///  修改: 新增 GenerateCCDAsync / GenerateBoxBehnkenAsync / GenerateDOptimalAsync / GetDesignQualityAsync
     /// </summary>
-    public class DOEDesignService : IDOEDesignService
+    public partial class DOEDesignService : IDOEDesignService
     {
         private readonly IDOERepository _repository;
         private readonly ILogService _logger;

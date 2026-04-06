@@ -4,6 +4,10 @@ namespace MaxChemical.Modules.DOE.Models
 {
     /// <summary>
     /// GPR 模型状态实体 — 按 FlowId + FactorSignature 联合唯一，支持多模型
+    /// 
+    /// ★ 修改: 新增 ProjectId 字段
+    ///   - 项目模式下: GPR 模型绑定到 ProjectId + FactorSignature
+    ///   - 独立模式下: GPR 模型仍然绑定到 FlowId + FactorSignature（完全兼容）
     /// </summary>
     public class GPRModelState
     {
@@ -13,6 +17,12 @@ namespace MaxChemical.Modules.DOE.Models
         /// 关联的流程 ID
         /// </summary>
         public string FlowId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// ★ 新增: 关联的项目 ID（可空，向后兼容）
+        /// 不为空时，模型按 ProjectId + FactorSignature 查找
+        /// </summary>
+        public string? ProjectId { get; set; }
 
         /// <summary>
         /// 因子签名（因子名按字母排序后用逗号拼接，如 "Flow,H2Flow,Temperature"）

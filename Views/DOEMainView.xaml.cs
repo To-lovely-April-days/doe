@@ -19,7 +19,7 @@ namespace MaxChemical.Modules.DOE.Views
         private DOEHistoryViewModel? _historyVm;
         private DOEMainViewModel? _mainVm;
 
-        // ──  迷你模式状态保存 ──
+        // ── 迷你模式状态保存 ──
         private double _savedWidth, _savedHeight, _savedLeft, _savedTop;
         private WindowState _savedWindowState;
         private const double MINI_WIDTH = 320;
@@ -55,7 +55,13 @@ namespace MaxChemical.Modules.DOE.Views
             DragMove();
         }
 
-        private void CloseBtn_Click(object sender, RoutedEventArgs e) => Close();
+        private void CloseBtn_Click(object sender, RoutedEventArgs e)
+        {
+            // ★ 修复: 关闭窗口时取消事件订阅，防止下次打开时重复弹窗
+            if (_mainVm != null)
+                _mainVm.Dispose();
+            Close();
+        }
 
         private async void TabRadio_Checked(object sender, RoutedEventArgs e)
         {
@@ -117,10 +123,10 @@ namespace MaxChemical.Modules.DOE.Views
                 ModelAnalysisView.DataContext = _modelAnalysisVm;
                 HistoryView.DataContext = _historyVm;
 
-                //  迷你面板绑定到执行 ViewModel
+                // 迷你面板绑定到执行 ViewModel
                 MiniPanel.DataContext = _execVm;
 
-                //  监听迷你模式切换
+                // 监听迷你模式切换
                 _execVm.PropertyChanged += (s, e) =>
                 {
                     if (e.PropertyName == nameof(DOEExecutionDashboardViewModel.IsMiniMode))
@@ -131,6 +137,8 @@ namespace MaxChemical.Modules.DOE.Views
                             SwitchToNormalMode();
                     }
                 };
+
+                // ── 事件订阅: MainViewModel → 子页面 ──
 
                 mainVm.RequestLoadExecution += async (s, id) =>
                 {
@@ -149,6 +157,14 @@ namespace MaxChemical.Modules.DOE.Views
                     if (_historyVm != null) await _historyVm.LoadBatchesAsync();
                 };
 
+                // ★ 新增: 概览刷新事件
+                mainVm.RequestRefreshOverview += async (s, e) =>
+                {
+                    if (_overviewVm != null) await _overviewVm.LoadAsync();
+                };
+
+                // ── 事件订阅: 历史页 → MainViewModel ──
+
                 if (_historyVm != null)
                 {
                     _historyVm.RequestExecuteBatch += (s, id) => mainVm.NavigateToExecution(id);
@@ -160,10 +176,22 @@ namespace MaxChemical.Modules.DOE.Views
                     };
                 }
 
+                // ── 事件订阅: 概览页 → MainViewModel ──
+
                 if (_overviewVm != null)
                 {
                     _overviewVm.RequestResumeBatch += (s, id) => mainVm.NavigateToExecution(id);
                     _overviewVm.RequestGoToHistory += (s, e) => mainVm.SelectedTabIndex = 3;
+
+                    // ★ 新增: 项目操作事件
+                    _overviewVm.RequestContinueProject += (s, projectId) =>
+                    {
+                        _ = mainVm.ContinueProjectAsync(projectId);
+                    };
+                    _overviewVm.RequestViewProject += (s, projectId) =>
+                    {
+                        mainVm.SelectedTabIndex = 3;  // 跳转历史页
+                    };
                 }
 
                 LoadingOverlay.Visibility = Visibility.Collapsed;
@@ -177,15 +205,21 @@ namespace MaxChemical.Modules.DOE.Views
                 MessageBox.Show($"初始化失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
+        private void ProjectMenuBtn_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button btn && btn.ContextMenu != null)
+            {
+                btn.ContextMenu.PlacementTarget = btn;
+                btn.ContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+                btn.ContextMenu.DataContext = DataContext;
+                btn.ContextMenu.IsOpen = true;
+            }
+        }
 
-        // ══════════════  迷你模式切换 ══════════════
+        // ══════════════ 迷你模式切换 ══════════════
 
-        /// <summary>
-        /// 切换到迷你模式：保存窗口状态 → 隐藏主内容 → 动画缩小 → 置顶
-        /// </summary>
         private void SwitchToMiniMode()
         {
-            // 保存当前窗口状态
             _savedWindowState = WindowState;
             if (WindowState == WindowState.Maximized)
                 WindowState = WindowState.Normal;
@@ -195,37 +229,28 @@ namespace MaxChemical.Modules.DOE.Views
             _savedLeft = Left;
             _savedTop = Top;
 
-            // 切换内容
             MainContent.Visibility = Visibility.Collapsed;
             MiniPanel.Visibility = Visibility.Visible;
             MiniPanel.Opacity = 0;
 
-            // 瞬切尺寸和位置
             SizeToContent = SizeToContent.Height;
             Width = MINI_WIDTH;
             var screen = SystemParameters.WorkArea;
             Left = screen.Right - MINI_WIDTH - 20;
-            Top = screen.Bottom - 260 - 20;  // 预估高度
+            Top = screen.Bottom - 260 - 20;
 
             Topmost = true;
             ResizeMode = ResizeMode.NoResize;
 
-            // 淡入
             MiniPanel.BeginAnimation(OpacityProperty,
                 new DoubleAnimation(0, 1, new Duration(TimeSpan.FromMilliseconds(150))));
         }
 
-        /// <summary>
-        /// 恢复到正常模式：清除动画 → 显示主内容 → 动画放大 → 取消置顶
-        /// </summary>
         private void SwitchToNormalMode()
         {
-
-            // 淡出迷你面板
             var fadeOut = new DoubleAnimation(1, 0, new Duration(TimeSpan.FromMilliseconds(120)));
             fadeOut.Completed += (s, e) =>
             {
-                // 淡出完成后瞬切回大窗口
                 MiniPanel.Visibility = Visibility.Collapsed;
                 MainContent.Visibility = Visibility.Visible;
                 MainContent.Opacity = 0;
@@ -242,7 +267,6 @@ namespace MaxChemical.Modules.DOE.Views
                 if (_savedWindowState == WindowState.Maximized)
                     WindowState = WindowState.Maximized;
 
-                // 淡入主内容
                 MainContent.BeginAnimation(OpacityProperty,
                     new DoubleAnimation(0, 1, new Duration(TimeSpan.FromMilliseconds(150))));
             };

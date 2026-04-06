@@ -199,6 +199,31 @@ namespace MaxChemical.Modules.DOE.ViewModels
         private GPRModelDetail _selectedModel = new();
         private bool _isLoading;
         private string _statusMessage = "";
+        // ── Loading 进度条属性 ──
+        private ObservableCollection<LoadingStepItem> _loadingSteps = new();
+        private int _loadingProgressPercent;
+        private double _loadingProgressWidth;
+        private string _loadingStepText = "";
+        public ObservableCollection<LoadingStepItem> LoadingSteps
+        {
+            get => _loadingSteps;
+            set => SetProperty(ref _loadingSteps, value);
+        }
+        public int LoadingProgressPercent
+        {
+            get => _loadingProgressPercent;
+            set => SetProperty(ref _loadingProgressPercent, value);
+        }
+        public double LoadingProgressWidth
+        {
+            get => _loadingProgressWidth;
+            set => SetProperty(ref _loadingProgressWidth, value);
+        }
+        public string LoadingStepText
+        {
+            get => _loadingStepText;
+            set => SetProperty(ref _loadingStepText, value);
+        }
         private List<OptimalFactorItem> _optimalFactors = new();
         private string _optimalResponseText = "—";
         private string _optimalConfidenceText = "";
@@ -599,6 +624,53 @@ namespace MaxChemical.Modules.DOE.ViewModels
             IsGprTabSelected = toGpr;
             if (!toGpr) _ = LoadOlsBatchListAsync();
         }
+        /// <summary>
+        /// 初始化 Loading 步骤列表
+        /// </summary>
+        private void InitLoadingSteps(string[] stepNames)
+        {
+            var items = new ObservableCollection<LoadingStepItem>();
+            foreach (var name in stepNames)
+                items.Add(new LoadingStepItem { StepName = name });
+            if (items.Count > 0) items[0].IsActive = true;
+            LoadingSteps = items;
+            LoadingProgressPercent = 0;
+            LoadingProgressWidth = 0;
+            LoadingStepText = stepNames.Length > 0 ? stepNames[0] : "";
+        }
+
+      
+
+        /// <summary>
+        /// 推进到下一步 — async 版本，每步结束让 UI 线程喘息一帧
+        /// </summary>
+        private async Task AdvanceLoadingStepAsync(int stepIndex, int totalSteps)
+        {
+            if (stepIndex < 0 || stepIndex >= LoadingSteps.Count) return;
+
+            // 标记当前步完成
+            LoadingSteps[stepIndex].IsActive = false;
+            LoadingSteps[stepIndex].IsCompleted = true;
+
+            // 激活下一步
+            if (stepIndex + 1 < LoadingSteps.Count)
+            {
+                LoadingSteps[stepIndex + 1].IsActive = true;
+                LoadingStepText = LoadingSteps[stepIndex + 1].StepName;
+            }
+            else
+            {
+                LoadingStepText = "完成";
+            }
+
+            // 更新百分比
+            LoadingProgressPercent = (int)((stepIndex + 1.0) / totalSteps * 100);
+            LoadingProgressWidth = 320.0 * LoadingProgressPercent / 100.0;
+
+            // ★★★ 关键：让出 UI 线程，让动画和进度条有机会渲染 ★★★
+            await System.Windows.Application.Current.Dispatcher.InvokeAsync(
+                () => { }, System.Windows.Threading.DispatcherPriority.Render);
+        }
 
         // ══════════════ 公开加载方法 ══════════════
         public async Task LoadBatchAsync(string batchId)
@@ -618,6 +690,8 @@ namespace MaxChemical.Modules.DOE.ViewModels
         private async Task LoadOlsSurfaceAsync()
         {
             if (SelectedOlsBatch == null || string.IsNullOrEmpty(_selectedResponseName)) return;
+            IsLoading = true;
+            StatusMessage = "正在生成响应曲面...";
             if (string.IsNullOrEmpty(OlsSurfaceFactor1) || string.IsNullOrEmpty(OlsSurfaceFactor2)
                 || OlsSurfaceFactor1 == OlsSurfaceFactor2) return;
 
@@ -661,24 +735,22 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 _logger.LogError(ex, "OLS 响应曲面加载失败");
             }
+            finally
+            {
+                IsLoading = false;  // ★ 加这行
+            }
         }
         /// <summary>
         /// ★ v7: 用 OxyPlot HeatMapSeries 渲染等高线图
         /// </summary>
         private void BuildContourPlot(SurfaceData data)
         {
-            var model = new PlotModel
-            {
-                Title = $"OLS 等高线: {data.XLabel} × {data.YLabel}",
-                TitleFontSize = 12,
-                PlotMargins = new OxyThickness(60, 30, 80, 40)
-            };
+            var model = new PlotModel { PlotMargins = new OxyThickness(60, 8, 80, 32) };
 
             int nx = data.X.Count;
             int ny = data.Y.Count;
             if (nx < 2 || ny < 2) { OlsContourPlot = model; return; }
 
-            // 使用 HeatMapSeries
             var heatMap = new HeatMapSeries
             {
                 X0 = data.X[0],
@@ -689,27 +761,13 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 RenderMethod = HeatMapRenderMethod.Bitmap,
                 Data = new double[nx, ny]
             };
-
             for (int j = 0; j < ny; j++)
                 for (int i = 0; i < nx; i++)
                     heatMap.Data[i, j] = data.Z[j][i];
-
             model.Series.Add(heatMap);
 
-            model.Axes.Add(new LinearAxis
-            {
-                Position = AxisPosition.Bottom,
-                Title = data.XLabel,
-                FontSize = 10
-            });
-            model.Axes.Add(new LinearAxis
-            {
-                Position = AxisPosition.Left,
-                Title = data.YLabel,
-                FontSize = 10
-            });
-
-            // 颜色轴
+            model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = data.XLabel });
+            model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = data.YLabel });
             model.Axes.Add(new LinearColorAxis
             {
                 Position = AxisPosition.Right,
@@ -718,6 +776,9 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 FontSize = 9
             });
 
+            ApplyJmpStyle(model);
+            // 等高线图需要更宽的右边距给 color bar
+            model.PlotMargins = new OxyThickness(48, 8, 80, 32);
             OlsContourPlot = model;
         }
         public async Task LoadAsync() { await LoadModelsAsync(); }
@@ -808,75 +869,52 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 var json = await _analysisService.GetMainEffectsForResponseAsync(
                     SelectedOlsBatch.BatchId, _selectedResponseName);
                 var data = JsonConvert.DeserializeObject<Dictionary<string, List<MainEffectPoint>>>(json);
-                if (data == null || data.Count == 0) return;
-
-                var model = new PlotModel
-                {
-                    Title = "主效应图",
-                    TitleFontSize = 12,
-                    PlotMargins = new OxyThickness(50, 25, 15, 35)
-                };
-                model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = _selectedResponseName, FontSize = 10 });
-
-                // 所有因子共用 X 轴（用索引，标签通过 tooltip 显示）
-                model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "因子水平", FontSize = 10 });
-
-                var colors = new[] { OxyColors.Blue, OxyColors.Red, OxyColors.Green, OxyColors.Orange,
-                                     OxyColors.Purple, OxyColors.Brown, OxyColors.DarkCyan };
-                int ci = 0;
-
-                // 全局均值参考线
-                double globalMean = data.Values.SelectMany(pts => pts).Average(p => p.Mean);
-                var meanLine = new LineSeries { Color = OxyColors.Gray, LineStyle = LineStyle.Dash, StrokeThickness = 1 };
-                // 只要横跨所有因子的范围即可
-                double xMin = double.MaxValue, xMax = double.MinValue;
-
-                foreach (var kv in data)
-                {
-                    var series = new LineSeries
-                    {
-                        Title = kv.Key,
-                        Color = colors[ci % colors.Length],
-                        MarkerType = MarkerType.Circle,
-                        MarkerSize = 5,
-                        StrokeThickness = 2
-                    };
-                    for (int i = 0; i < kv.Value.Count; i++)
-                    {
-                        var pt = kv.Value[i];
-                        double xVal;
-                        if (pt.Level is double d) xVal = d;
-                        else if (double.TryParse(pt.Level?.ToString(), out var parsed)) xVal = parsed;
-                        else xVal = i; // 类别因子用索引
-
-                        series.Points.Add(new DataPoint(xVal, pt.Mean));
-                        xMin = Math.Min(xMin, xVal);
-                        xMax = Math.Max(xMax, xVal);
-                    }
-                    model.Series.Add(series);
-                    ci++;
-                }
-
-                // 全局均值线
-                if (xMin < xMax)
-                {
-                    meanLine.Points.Add(new DataPoint(xMin, globalMean));
-                    meanLine.Points.Add(new DataPoint(xMax, globalMean));
-                    model.Series.Add(meanLine);
-                }
-
-                model.Legends.Add(new Legend
-                {
-                    LegendPosition = LegendPosition.RightTop,
-                    LegendFontSize = 10,
-                    IsLegendVisible = true
-                });
-
-                OlsMainEffectsPlot = model;
+                BuildMainEffectsModel(data);
             }
             catch (Exception ex) { _logger.LogError(ex, "主效应图加载失败"); }
         }
+        // ═══ 主效应图构建辅助（批次+直接导入共用） ═══
 
+        private void BuildMainEffectsModel(Dictionary<string, List<MainEffectPoint>> data)
+        {
+            if (data == null || data.Count == 0) return;
+
+            var model = new PlotModel();
+            model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = _selectedResponseName });
+            model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Factor level" });
+
+            int ci = 0;
+            double globalMean = data.Values.SelectMany(pts => pts).Average(p => p.Mean);
+            double xMin = double.MaxValue, xMax = double.MinValue;
+
+            foreach (var kv in data)
+            {
+                var series = JmpLine(ci, kv.Key);
+                for (int i = 0; i < kv.Value.Count; i++)
+                {
+                    var pt = kv.Value[i];
+                    double xVal = pt.Level is double d ? d
+                        : double.TryParse(pt.Level?.ToString(), out var parsed) ? parsed : i;
+                    series.Points.Add(new DataPoint(xVal, pt.Mean));
+                    xMin = Math.Min(xMin, xVal);
+                    xMax = Math.Max(xMax, xVal);
+                }
+                model.Series.Add(series);
+                ci++;
+            }
+
+            if (xMin < xMax)
+            {
+                var meanLine = JmpRefLine();
+                meanLine.Points.Add(new DataPoint(xMin, globalMean));
+                meanLine.Points.Add(new DataPoint(xMax, globalMean));
+                model.Series.Add(meanLine);
+            }
+
+            model.Legends.Add(JmpLegend());
+            ApplyJmpStyle(model);
+            OlsMainEffectsPlot = model;
+        }
         // ═══ ★ v8: 交互效应图 ═══
 
         private async Task LoadOlsInteractionEffectsAsync()
@@ -887,62 +925,45 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 var json = await _analysisService.GetInteractionEffectsForResponseAsync(
                     SelectedOlsBatch.BatchId, _selectedResponseName);
                 var data = JsonConvert.DeserializeObject<List<InteractionEffectData>>(json);
-                if (data == null || data.Count == 0) return;
-
-                // 取第一对因子的交互效应图（如果多对，只显示最有代表性的）
-                var first = data[0];
-
-                var model = new PlotModel
-                {
-                    Title = $"交互效应: {first.Factor1} × {first.Factor2}",
-                    TitleFontSize = 12,
-                    PlotMargins = new OxyThickness(50, 25, 15, 35)
-                };
-                model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = _selectedResponseName, FontSize = 10 });
-                model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = first.Factor1, FontSize = 10 });
-
-                // 按 f2 水平分组画线
-                var grouped = first.Data.GroupBy(d => d.F2?.ToString() ?? "").ToList();
-                var colors = new[] { OxyColors.Blue, OxyColors.Red, OxyColors.Green, OxyColors.Orange };
-                int ci = 0;
-
-                foreach (var group in grouped)
-                {
-                    var series = new LineSeries
-                    {
-                        Title = $"{first.Factor2}={group.Key}",
-                        Color = colors[ci % colors.Length],
-                        MarkerType = MarkerType.Circle,
-                        MarkerSize = 4,
-                        StrokeThickness = 2
-                    };
-                    foreach (var pt in group.OrderBy(p =>
-                    {
-                        if (p.F1 is double d) return d;
-                        if (double.TryParse(p.F1?.ToString(), out var parsed)) return parsed;
-                        return 0.0;
-                    }))
-                    {
-                        double xVal;
-                        if (pt.F1 is double d) xVal = d;
-                        else if (double.TryParse(pt.F1?.ToString(), out var parsed)) xVal = parsed;
-                        else xVal = 0;
-                        series.Points.Add(new DataPoint(xVal, pt.Mean));
-                    }
-                    model.Series.Add(series);
-                    ci++;
-                }
-
-                model.Legends.Add(new Legend
-                {
-                    LegendPosition = LegendPosition.RightTop,
-                    LegendFontSize = 10,
-                    IsLegendVisible = true
-                });
-
-                OlsInteractionPlot = model;
+                BuildInteractionEffectsModel(data);
             }
             catch (Exception ex) { _logger.LogError(ex, "交互效应图加载失败"); }
+        }
+        // ═══ 交互效应图构建辅助（批次+直接导入共用） ═══
+
+        private void BuildInteractionEffectsModel(List<InteractionEffectData> data)
+        {
+            if (data == null || data.Count == 0) return;
+
+            var first = data[0];
+            var model = new PlotModel();
+            model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = _selectedResponseName });
+            model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = first.Factor1 });
+
+            var grouped = first.Data.GroupBy(d => d.F2?.ToString() ?? "").ToList();
+            int ci = 0;
+
+            foreach (var group in grouped)
+            {
+                var series = JmpLine(ci, $"{first.Factor2}={group.Key}");
+                foreach (var pt in group.OrderBy(p =>
+                {
+                    if (p.F1 is double d) return d;
+                    if (double.TryParse(p.F1?.ToString(), out var parsed)) return parsed;
+                    return 0.0;
+                }))
+                {
+                    double xVal = pt.F1 is double d ? d
+                        : double.TryParse(pt.F1?.ToString(), out var parsed) ? parsed : 0;
+                    series.Points.Add(new DataPoint(xVal, pt.Mean));
+                }
+                model.Series.Add(series);
+                ci++;
+            }
+
+            model.Legends.Add(JmpLegend());
+            ApplyJmpStyle(model);
+            OlsInteractionPlot = model;
         }
 
         // ═══ ★ v8: Tukey HSD ═══
@@ -1050,62 +1071,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 HasBoxCoxResult = true;
 
                 // λ profile 图
-                if (data.LambdaProfile?.Lambdas != null)
-                {
-                    var model = new PlotModel
-                    {
-                        Title = "Box-Cox λ 优化曲线",
-                        TitleFontSize = 11,
-                        PlotMargins = new OxyThickness(50, 25, 15, 35)
-                    };
-                    model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "λ", FontSize = 10 });
-                    model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Log-Likelihood", FontSize = 10 });
-
-                    var line = new LineSeries { Color = OxyColors.SteelBlue, StrokeThickness = 2 };
-                    for (int i = 0; i < data.LambdaProfile.Lambdas.Count; i++)
-                    {
-                        var ll = data.LambdaProfile.LogLikelihoods[i];
-                        if (ll.HasValue)
-                            line.Points.Add(new DataPoint(data.LambdaProfile.Lambdas[i], ll.Value));
-                    }
-                    model.Series.Add(line);
-
-                    // 最优 λ 标记
-                    model.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
-                    {
-                        Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
-                        X = data.OptimalLambda,
-                        Color = OxyColors.Red,
-                        LineStyle = LineStyle.Dash,
-                        StrokeThickness = 1.5,
-                        Text = $"λ={data.OptimalLambda:F2}",
-                        TextColor = OxyColors.Red,
-                        FontSize = 10
-                    });
-
-                    // CI 范围
-                    if (data.LambdaCI != null && data.LambdaCI.Count == 2)
-                    {
-                        model.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
-                        {
-                            Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
-                            X = data.LambdaCI[0],
-                            Color = OxyColor.FromArgb(100, 0, 100, 255),
-                            LineStyle = LineStyle.Dot,
-                            StrokeThickness = 1
-                        });
-                        model.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
-                        {
-                            Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
-                            X = data.LambdaCI[1],
-                            Color = OxyColor.FromArgb(100, 0, 100, 255),
-                            LineStyle = LineStyle.Dot,
-                            StrokeThickness = 1
-                        });
-                    }
-
-                    BoxCoxProfilePlot = model;
-                }
+                BuildBoxCoxPlot(data);
             }
             catch (Exception ex)
             {
@@ -1201,17 +1167,30 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 IsLoading = true;
                 OlsStatusText = "正在进行 OLS 回归分析...";
-                OlsResult = await _analysisService.FitOlsAsync(SelectedOlsBatch.BatchId, _selectedResponseName, "quadratic");
+                StatusMessage = "正在进行 OLS 回归分析...";
+                var steps = new[] {
+            "Fit OLS model", "ANOVA table", "Pareto effects",
+            "Residual diagnostics", "Response surface",
+            "Effect summary", "Outlier diagnostics",
+            "Box-Cox / Tukey"
+        };
+                InitLoadingSteps(steps);
+                int totalSteps = steps.Length;
+
+                // Step 0: Fit OLS — 推到线程池
+                OlsResult = await Task.Run(() =>
+                    _analysisService.FitOlsAsync(SelectedOlsBatch.BatchId, _selectedResponseName, "quadratic"));
 
                 if (OlsResult?.ModelSummary != null)
                 {
-                    OlsStatusText = $"OLS 分析完成: R²=...";
+                    OlsStatusText = $"OLS 分析完成: R²={OlsResult.ModelSummary.RSquared:F4}";
+                    await AdvanceLoadingStepAsync(0, totalSteps);
 
-                    // ★ v7: 不可估计项警告
+                    // 不可估计项警告
                     InestimableWarning = OlsResult.InestimableWarning ?? "";
                     HasInestimableWarning = !string.IsNullOrEmpty(InestimableWarning);
 
-                    // ★ v7: 初始化 OLS 曲面因子选择列表（仅连续因子可做曲面）
+                    // 初始化 OLS 曲面因子列表
                     var batch = await _repository.GetBatchWithDetailsAsync(SelectedOlsBatch!.BatchId);
                     if (batch != null)
                     {
@@ -1226,26 +1205,50 @@ namespace MaxChemical.Modules.DOE.ViewModels
                         }
                     }
 
-                    // 方程展示
+                    // 方程展示（UI线程操作，不包 Task.Run）
                     UpdateEquationsDisplay(OlsResult);
-                    // Pareto 图
-                    await LoadOlsParetoAsync();
-                    // 残差四合一
-                    await LoadResidualDiagnosticsAsync();
-                    // ★ v7: 自动加载 OLS 响应曲面
-                    await LoadOlsSurfaceAsync();
-                    // ★ v8: 加载主效应图 + 交互效应图 + 异常点分析 + Tukey HSD
-                    await LoadOlsMainEffectsAsync();
-                    await LoadOlsInteractionEffectsAsync();
-                    await LoadOutlierAnalysisAsync();
-                    await LoadTukeyHSDAsync();
 
-                    await LoadBoxCoxAnalysisAsync();
+                    // Step 1+2: ANOVA + Pareto
+                    await Task.Run(() => LoadOlsParetoAsync());
+                    await AdvanceLoadingStepAsync(1, totalSteps);
+                    await AdvanceLoadingStepAsync(2, totalSteps);
+
+                    // Step 3: 残差四合一
+                    await Task.Run(() => LoadResidualDiagnosticsAsync());
+                    await AdvanceLoadingStepAsync(3, totalSteps);
+
+                    // Step 4: 响应曲面
+                    await Task.Run(() => LoadOlsSurfaceAsync());
+                    await AdvanceLoadingStepAsync(4, totalSteps);
+
+                    // Step 5: 主效应 + 交互效应
+                    await Task.Run(() => LoadOlsMainEffectsAsync());
+                    await Task.Run(() => LoadOlsInteractionEffectsAsync());
+                    await AdvanceLoadingStepAsync(5, totalSteps);
+
+                    // Step 6: 异常点
+                    await Task.Run(() => LoadOutlierAnalysisAsync());
+                    await AdvanceLoadingStepAsync(6, totalSteps);
+
+                    // Step 7: Tukey + Box-Cox
+                    await Task.Run(() => LoadTukeyHSDAsync());
+                    await Task.Run(() => LoadBoxCoxAnalysisAsync());
+                    await AdvanceLoadingStepAsync(7, totalSteps);
                 }
-                else { OlsStatusText = "OLS 分析返回空结果"; }
+                else
+                {
+                    OlsStatusText = "OLS 分析返回空结果";
+                }
             }
-            catch (Exception ex) { _logger.LogError(ex, "OLS 分析失败"); OlsStatusText = $"OLS 分析失败: {ex.Message}"; }
-            finally { IsLoading = false; }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "OLS 分析失败");
+                OlsStatusText = $"OLS 分析失败: {ex.Message}";
+            }
+            finally
+            {
+                IsLoading = false;
+            }
             UpdateCoefficientTableDisplay(OlsResult);
         }
         // ═══ 新增方法: 解析方程展示 ═══
@@ -1437,9 +1440,9 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 if (!item.IsIncluded)
                     color = OxyColor.FromArgb(100, 200, 200, 200);
                 else if (item.IsSignificant)
-                    color = OxyColor.FromRgb(66, 133, 244);
+                    color = JmpPalette[0];
                 else
-                    color = OxyColor.FromRgb(160, 196, 255);
+                    color = OxyColor.FromArgb(120, 0x4A, 0x7F, 0xC4);
                 series.Items.Add(new BarItem { Value = item.AbsT, Color = color });
             }
             model.Series.Add(series);
@@ -1449,11 +1452,11 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 Type = LineAnnotationType.Vertical,
                 X = tCrit,
-                Color = OxyColor.FromArgb(200, 220, 50, 50),
+                Color = OxyColor.FromRgb(198, 40, 40),
                 LineStyle = LineStyle.Dash,
                 StrokeThickness = 1.8,
                 Text = $"  {_paretoLogWorthCrit:F2}",
-                TextColor = OxyColor.FromRgb(200, 50, 50),
+                TextColor = OxyColor.FromRgb(198, 40, 40),
                 FontSize = 9,
                 FontWeight = OxyPlot.FontWeights.Bold,
                 TextLinePosition = 0.5,
@@ -2036,7 +2039,8 @@ namespace MaxChemical.Modules.DOE.ViewModels
             // 更新红色竖线（不再显示 Text）
             var vline = pm.Annotations
                 .OfType<OxyPlot.Annotations.LineAnnotation>()
-                .FirstOrDefault(a => a.Type == OxyPlot.Annotations.LineAnnotationType.Vertical && a.Color == OxyColors.Red);
+               .FirstOrDefault(a => a.Type == OxyPlot.Annotations.LineAnnotationType.Vertical
+                        && (a.Color == OxyColors.Red || a.Color == OxyColor.FromRgb(198, 40, 40)));
             if (vline != null)
             {
                 double curX = fdata.CurrentNumericValue;
@@ -2060,8 +2064,8 @@ namespace MaxChemical.Modules.DOE.ViewModels
         /// 重建单个图的全部内容（其他图）
         /// </summary>
         private void RebuildSinglePlot(PlotModel pm, string fname, ProfilerFactorData fdata,
-       double currentPredicted, double yMin, double yMax, string yTitle)
-        {// ★ 更新 Subtitle 显示当前值
+      double currentPredicted, double yMin, double yMax, string yTitle)
+        {
             if (fdata.IsCategorical)
             {
                 var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "";
@@ -2071,8 +2075,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 pm.Subtitle = $"{fdata.CurrentNumericValue:F2}";
             }
-            pm.SubtitleColor = OxyColors.Red;
-            pm.SubtitleFontSize = 10;
+
             pm.Series.Clear();
             pm.Annotations.Clear();
             pm.Axes.Clear();
@@ -2080,7 +2083,6 @@ namespace MaxChemical.Modules.DOE.ViewModels
             pm.Axes.Add(new LinearAxis
             {
                 Position = AxisPosition.Left,
-                FontSize = 9,
                 Minimum = yMin,
                 Maximum = yMax,
                 Title = yTitle
@@ -2092,7 +2094,6 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 pm.Axes.Add(new LinearAxis
                 {
                     Position = AxisPosition.Bottom,
-                    FontSize = 9,
                     Minimum = -0.5,
                     Maximum = labels.Count - 0.5,
                     MajorStep = 1,
@@ -2104,37 +2105,30 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     }
                 });
 
-                // ★ v7: 类别因子 CI 带
-                if (fdata.YLower != null && fdata.YUpper != null
-                    && fdata.YLower.Count == fdata.Y.Count && fdata.Y.Count > 0)
+                if (fdata.YLower != null && fdata.YUpper != null && fdata.YLower.Count == fdata.Y.Count && fdata.Y.Count > 0)
                 {
-                    var areaSeries = new AreaSeries
-                    {
-                        Color = OxyColor.FromArgb(0, 0, 0, 0),
-                        Fill = OxyColor.FromArgb(40, 70, 130, 220),
-                        StrokeThickness = 0
-                    };
+                    var area = new AreaSeries { Color = OxyColor.FromArgb(0, 0, 0, 0), Fill = JmpCIFill(0), StrokeThickness = 0 };
                     for (int j = 0; j < fdata.Y.Count && j < labels.Count; j++)
                     {
-                        areaSeries.Points.Add(new DataPoint(j, fdata.YUpper[j]));
-                        areaSeries.Points2.Add(new DataPoint(j, fdata.YLower[j]));
+                        area.Points.Add(new DataPoint(j, fdata.YUpper[j]));
+                        area.Points2.Add(new DataPoint(j, fdata.YLower[j]));
                     }
-                    pm.Series.Add(areaSeries);
+                    pm.Series.Add(area);
                 }
 
                 var lineSeries = new LineSeries
                 {
-                    Color = OxyColors.Gray,
-                    StrokeThickness = 1.5,
+                    Color = OxyColor.FromRgb(160, 160, 160),
+                    StrokeThickness = 1.2,
                     MarkerType = MarkerType.Circle,
-                    MarkerSize = 5,
-                    MarkerFill = OxyColors.SteelBlue
+                    MarkerSize = 3.5,
+                    MarkerFill = JmpPalette[0]
                 };
                 for (int j = 0; j < fdata.Y.Count && j < labels.Count; j++)
                     lineSeries.Points.Add(new DataPoint(j, fdata.Y[j]));
                 pm.Series.Add(lineSeries);
 
-                var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "";
+                var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv2) ? cv2?.ToString() : "";
                 int curIdx = labels.IndexOf(curVal ?? "");
                 if (curIdx >= 0 && curIdx < fdata.Y.Count)
                 {
@@ -2142,45 +2136,31 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     {
                         Type = LineAnnotationType.Vertical,
                         X = curIdx,
-                        Color = OxyColors.Red,
-                        LineStyle = LineStyle.Dash,
-                        StrokeThickness = 1.5,
-                        Text = curVal ?? "",
-                        TextColor = OxyColors.Red,
-                        FontSize = 10,
-                        FontWeight = OxyPlot.FontWeights.Bold,
-                        TextLinePosition = 0.02,
-                        TextOrientation = OxyPlot.Annotations.AnnotationTextOrientation.Horizontal,
-                        TextHorizontalAlignment = OxyPlot.HorizontalAlignment.Center
+                        Color = OxyColor.FromRgb(198, 40, 40),
+                        LineStyle = LineStyle.Solid,
+                        StrokeThickness = 1
                     });
-                    var hl = new ScatterSeries { MarkerType = MarkerType.Circle, MarkerSize = 7, MarkerFill = OxyColors.Red };
+                    var hl = new ScatterSeries { MarkerType = MarkerType.Circle, MarkerSize = 5, MarkerFill = OxyColor.FromRgb(198, 40, 40) };
                     hl.Points.Add(new ScatterPoint(curIdx, fdata.Y[curIdx]));
                     pm.Series.Add(hl);
                 }
             }
             else
             {
-                pm.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, FontSize = 9 });
+                pm.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom });
 
-                // ★ v7: 连续因子 CI 带
-                if (fdata.YLower != null && fdata.YUpper != null
-                    && fdata.YLower.Count == fdata.Y.Count && fdata.Y.Count > 0)
+                if (fdata.YLower != null && fdata.YUpper != null && fdata.YLower.Count == fdata.Y.Count && fdata.Y.Count > 0)
                 {
-                    var areaSeries = new AreaSeries
-                    {
-                        Color = OxyColor.FromArgb(0, 0, 0, 0),
-                        Fill = OxyColor.FromArgb(40, 70, 130, 220),
-                        StrokeThickness = 0
-                    };
+                    var area = new AreaSeries { Color = OxyColor.FromArgb(0, 0, 0, 0), Fill = JmpCIFill(0), StrokeThickness = 0 };
                     for (int j = 0; j < fdata.X.Count; j++)
                     {
-                        areaSeries.Points.Add(new DataPoint(fdata.X[j], fdata.YUpper[j]));
-                        areaSeries.Points2.Add(new DataPoint(fdata.X[j], fdata.YLower[j]));
+                        area.Points.Add(new DataPoint(fdata.X[j], fdata.YUpper[j]));
+                        area.Points2.Add(new DataPoint(fdata.X[j], fdata.YLower[j]));
                     }
-                    pm.Series.Add(areaSeries);
+                    pm.Series.Add(area);
                 }
 
-                var line = new LineSeries { Color = OxyColors.SteelBlue, StrokeThickness = 2 };
+                var line = new LineSeries { Color = JmpPalette[0], StrokeThickness = 1.8 };
                 for (int j = 0; j < fdata.X.Count; j++)
                     line.Points.Add(new DataPoint(fdata.X[j], fdata.Y[j]));
                 pm.Series.Add(line);
@@ -2190,9 +2170,9 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 {
                     Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
                     X = curX,
-                    Color = OxyColors.Red,
-                    LineStyle = LineStyle.Dash,
-                    StrokeThickness = 1.5
+                    Color = OxyColor.FromRgb(198, 40, 40),
+                    LineStyle = LineStyle.Solid,
+                    StrokeThickness = 1
                 });
             }
 
@@ -2200,13 +2180,15 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 Type = OxyPlot.Annotations.LineAnnotationType.Horizontal,
                 Y = currentPredicted,
-                Color = OxyColor.FromArgb(80, 255, 0, 0),
+                Color = OxyColor.FromArgb(60, 198, 40, 40),
                 LineStyle = LineStyle.Dot,
-                StrokeThickness = 1
+                StrokeThickness = 0.8
             });
 
+            ApplyJmpProfilerStyle(pm);
             pm.InvalidatePlot(true);
         }
+
 
         /// <summary>
         /// ★ v6: 用户点击类别因子的某个水平
@@ -2359,64 +2341,47 @@ namespace MaxChemical.Modules.DOE.ViewModels
         /// </summary>
         private void BuildProfilerPlots(ProfilerResult data)
         {
-            // ★ 计算当前点的置信区间并显示
             string ciText = "";
-            // 用第一个因子的当前值来获取当前位置的 CI
             foreach (var kv in data.Factors)
             {
                 var fd = kv.Value;
-                if (fd.YLower != null && fd.YUpper != null && fd.YLower.Count > 0)
+                if (fd.YLower == null || fd.YUpper == null || fd.YLower.Count == 0) continue;
+                double? lo = null, hi = null;
+                if (fd.IsCategorical)
                 {
-                    double? lo = null, hi = null;
-                    if (fd.IsCategorical)
-                    {
-                        var curVal = _profilerCurrentValues.TryGetValue(kv.Key, out var cv) ? cv?.ToString() : "";
-                        var labels = fd.X_Labels;
-                        int idx = labels.IndexOf(curVal ?? "");
-                        if (idx >= 0 && idx < fd.YLower.Count)
-                        {
-                            lo = fd.YLower[idx];
-                            hi = fd.YUpper[idx];
-                        }
-                    }
+                    var curVal = _profilerCurrentValues.TryGetValue(kv.Key, out var cv) ? cv?.ToString() : "";
+                    int idx = fd.X_Labels.IndexOf(curVal ?? "");
+                    if (idx >= 0 && idx < fd.YLower.Count) { lo = fd.YLower[idx]; hi = fd.YUpper[idx]; }
+                }
+                else
+                {
+                    double curX = fd.CurrentNumericValue;
+                    var xs = fd.X;
+                    if (curX <= xs[0]) { lo = fd.YLower[0]; hi = fd.YUpper[0]; }
+                    else if (curX >= xs[xs.Count - 1]) { lo = fd.YLower[fd.YLower.Count - 1]; hi = fd.YUpper[fd.YUpper.Count - 1]; }
                     else
                     {
-                        double curX = fd.CurrentNumericValue;
-                        // 在 CI 曲线上插值
-                        var xs = fd.X;
-                        if (curX <= xs[0]) { lo = fd.YLower[0]; hi = fd.YUpper[0]; }
-                        else if (curX >= xs[xs.Count - 1]) { lo = fd.YLower[fd.YLower.Count - 1]; hi = fd.YUpper[fd.YUpper.Count - 1]; }
-                        else
+                        for (int k = 0; k < xs.Count - 1; k++)
                         {
-                            for (int k = 0; k < xs.Count - 1; k++)
+                            if (curX >= xs[k] && curX <= xs[k + 1])
                             {
-                                if (curX >= xs[k] && curX <= xs[k + 1])
-                                {
-                                    double t = (curX - xs[k]) / (xs[k + 1] - xs[k]);
-                                    lo = fd.YLower[k] + t * (fd.YLower[k + 1] - fd.YLower[k]);
-                                    hi = fd.YUpper[k] + t * (fd.YUpper[k + 1] - fd.YUpper[k]);
-                                    break;
-                                }
+                                double t = (curX - xs[k]) / (xs[k + 1] - xs[k]);
+                                lo = fd.YLower[k] + t * (fd.YLower[k + 1] - fd.YLower[k]);
+                                hi = fd.YUpper[k] + t * (fd.YUpper[k + 1] - fd.YUpper[k]);
+                                break;
                             }
                         }
                     }
-                    if (lo.HasValue && hi.HasValue)
-                    {
-                        ciText = $"  95%CI [{lo.Value:F4}, {hi.Value:F4}]";
-                    }
-                    break;  // 只需要第一个因子的 CI 来代表当前预测位置
                 }
+                if (lo.HasValue && hi.HasValue) ciText = $"  95%CI [{lo.Value:F4}, {hi.Value:F4}]";
+                break;
             }
             ProfilerCurrentPredicted = $"{data.ResponseName}    {data.CurrentPredicted:F4}{ciText}";
 
             double yMin = double.MaxValue, yMax = double.MinValue;
             foreach (var kv in data.Factors)
             {
-                if (kv.Value.Y.Count > 0)
-                {
-                    yMin = Math.Min(yMin, kv.Value.Y.Min());
-                    yMax = Math.Max(yMax, kv.Value.Y.Max());
-                }
+                if (kv.Value.Y.Count > 0) { yMin = Math.Min(yMin, kv.Value.Y.Min()); yMax = Math.Max(yMax, kv.Value.Y.Max()); }
             }
             double yPad = (yMax - yMin) * 0.1;
             if (yPad < 0.01) yPad = 1.0;
@@ -2426,32 +2391,20 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 if (!data.Factors.TryGetValue(fname, out var fdata)) continue;
 
-                // ★ 计算当前因子值的显示文本
-                string subtitleText = "";
-                if (fdata.IsCategorical)
-                {
-                    var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "";
-                    subtitleText = curVal ?? "";
-                }
-                else
-                {
-                    subtitleText = $"{fdata.CurrentNumericValue:F2}";
-                }
+                string subtitleText = fdata.IsCategorical
+                    ? (_profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "") ?? ""
+                    : $"{fdata.CurrentNumericValue:F2}";
 
                 var pm = new PlotModel
                 {
                     Title = fname,
-                    TitleFontSize = 11,
                     Subtitle = subtitleText,
-                    SubtitleFontSize = 10,
-                    SubtitleColor = OxyColors.Red,
-                    PlotMargins = new OxyThickness(50, 20, 10, 35)  // 顶部留更多空间给 Subtitle
+                    PlotMargins = new OxyThickness(50, 20, 10, 35)
                 };
 
                 pm.Axes.Add(new LinearAxis
                 {
                     Position = AxisPosition.Left,
-                    FontSize = 9,
                     Minimum = yMin - yPad,
                     Maximum = yMax + yPad,
                     Title = plots.Count == 0 ? data.ResponseName : ""
@@ -2463,7 +2416,6 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     pm.Axes.Add(new LinearAxis
                     {
                         Position = AxisPosition.Bottom,
-                        FontSize = 9,
                         Minimum = -0.5,
                         Maximum = labels.Count - 0.5,
                         MajorStep = 1,
@@ -2475,37 +2427,31 @@ namespace MaxChemical.Modules.DOE.ViewModels
                         }
                     });
 
-                    // ★ v7: 类别因子置信区间带
-                    if (fdata.YLower != null && fdata.YUpper != null
-                        && fdata.YLower.Count == fdata.Y.Count && fdata.Y.Count > 0)
+                    // CI 带
+                    if (fdata.YLower != null && fdata.YUpper != null && fdata.YLower.Count == fdata.Y.Count && fdata.Y.Count > 0)
                     {
-                        var areaSeries = new AreaSeries
-                        {
-                            Color = OxyColor.FromArgb(0, 0, 0, 0),
-                            Fill = OxyColor.FromArgb(40, 70, 130, 220),
-                            StrokeThickness = 0
-                        };
+                        var area = new AreaSeries { Color = OxyColor.FromArgb(0, 0, 0, 0), Fill = JmpCIFill(0), StrokeThickness = 0 };
                         for (int j = 0; j < fdata.Y.Count && j < labels.Count; j++)
                         {
-                            areaSeries.Points.Add(new DataPoint(j, fdata.YUpper[j]));
-                            areaSeries.Points2.Add(new DataPoint(j, fdata.YLower[j]));
+                            area.Points.Add(new DataPoint(j, fdata.YUpper[j]));
+                            area.Points2.Add(new DataPoint(j, fdata.YLower[j]));
                         }
-                        pm.Series.Add(areaSeries);
+                        pm.Series.Add(area);
                     }
 
                     var lineSeries = new LineSeries
                     {
-                        Color = OxyColors.Gray,
-                        StrokeThickness = 1.5,
+                        Color = OxyColor.FromRgb(160, 160, 160),
+                        StrokeThickness = 1.2,
                         MarkerType = MarkerType.Circle,
-                        MarkerSize = 5,
-                        MarkerFill = OxyColors.SteelBlue
+                        MarkerSize = 3.5,
+                        MarkerFill = JmpPalette[0]
                     };
                     for (int i = 0; i < fdata.Y.Count && i < labels.Count; i++)
                         lineSeries.Points.Add(new DataPoint(i, fdata.Y[i]));
                     pm.Series.Add(lineSeries);
 
-                    var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "";
+                    var curVal = _profilerCurrentValues.TryGetValue(fname, out var cvv) ? cvv?.ToString() : "";
                     int curIdx = labels.IndexOf(curVal ?? "");
                     if (curIdx >= 0 && curIdx < fdata.Y.Count)
                     {
@@ -2513,53 +2459,41 @@ namespace MaxChemical.Modules.DOE.ViewModels
                         {
                             Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
                             X = curIdx,
-                            Color = OxyColors.Red,
-                            LineStyle = LineStyle.Dash,
-                            StrokeThickness = 1.5
+                            Color = OxyColor.FromRgb(198, 40, 40),
+                            LineStyle = LineStyle.Solid,
+                            StrokeThickness = 1
                         });
-                        var highlight = new ScatterSeries
-                        {
-                            MarkerType = MarkerType.Circle,
-                            MarkerSize = 7,
-                            MarkerFill = OxyColors.Red
-                        };
-                        highlight.Points.Add(new ScatterPoint(curIdx, fdata.Y[curIdx]));
-                        pm.Series.Add(highlight);
+                        var hl = new ScatterSeries { MarkerType = MarkerType.Circle, MarkerSize = 5, MarkerFill = OxyColor.FromRgb(198, 40, 40) };
+                        hl.Points.Add(new ScatterPoint(curIdx, fdata.Y[curIdx]));
+                        pm.Series.Add(hl);
                     }
 
                     pm.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
                     {
                         Type = OxyPlot.Annotations.LineAnnotationType.Horizontal,
                         Y = data.CurrentPredicted,
-                        Color = OxyColor.FromArgb(80, 255, 0, 0),
+                        Color = OxyColor.FromArgb(60, 198, 40, 40),
                         LineStyle = LineStyle.Dot,
-                        StrokeThickness = 1
+                        StrokeThickness = 0.8
                     });
                 }
                 else
                 {
-                    // 连续因子
-                    pm.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, FontSize = 9 });
+                    pm.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom });
 
-                    // ★ v7: 连续因子置信区间带（必须在曲线之前添加）
-                    if (fdata.YLower != null && fdata.YUpper != null
-                        && fdata.YLower.Count == fdata.Y.Count && fdata.Y.Count > 0)
+                    // CI 带
+                    if (fdata.YLower != null && fdata.YUpper != null && fdata.YLower.Count == fdata.Y.Count && fdata.Y.Count > 0)
                     {
-                        var areaSeries = new AreaSeries
-                        {
-                            Color = OxyColor.FromArgb(0, 0, 0, 0),
-                            Fill = OxyColor.FromArgb(40, 70, 130, 220),
-                            StrokeThickness = 0
-                        };
+                        var area = new AreaSeries { Color = OxyColor.FromArgb(0, 0, 0, 0), Fill = JmpCIFill(0), StrokeThickness = 0 };
                         for (int j = 0; j < fdata.X.Count; j++)
                         {
-                            areaSeries.Points.Add(new DataPoint(fdata.X[j], fdata.YUpper[j]));
-                            areaSeries.Points2.Add(new DataPoint(fdata.X[j], fdata.YLower[j]));
+                            area.Points.Add(new DataPoint(fdata.X[j], fdata.YUpper[j]));
+                            area.Points2.Add(new DataPoint(fdata.X[j], fdata.YLower[j]));
                         }
-                        pm.Series.Add(areaSeries);
+                        pm.Series.Add(area);
                     }
 
-                    var line = new LineSeries { Color = OxyColors.SteelBlue, StrokeThickness = 2 };
+                    var line = new LineSeries { Color = JmpPalette[0], StrokeThickness = 1.8 };
                     for (int i = 0; i < fdata.X.Count; i++)
                         line.Points.Add(new DataPoint(fdata.X[i], fdata.Y[i]));
                     pm.Series.Add(line);
@@ -2569,20 +2503,22 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     {
                         Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
                         X = curX,
-                        Color = OxyColors.Red,
-                        LineStyle = LineStyle.Dash,
-                        StrokeThickness = 1.5
+                        Color = OxyColor.FromRgb(198, 40, 40),
+                        LineStyle = LineStyle.Solid,
+                        StrokeThickness = 1
                     });
 
                     pm.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
                     {
                         Type = OxyPlot.Annotations.LineAnnotationType.Horizontal,
                         Y = data.CurrentPredicted,
-                        Color = OxyColor.FromArgb(80, 255, 0, 0),
+                        Color = OxyColor.FromArgb(60, 198, 40, 40),
                         LineStyle = LineStyle.Dot,
-                        StrokeThickness = 1
+                        StrokeThickness = 0.8
                     });
                 }
+
+                ApplyJmpProfilerStyle(pm);
                 plots.Add(pm);
             }
             ProfilerPlots = plots;
@@ -2679,81 +2615,91 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 var diag = JsonConvert.DeserializeObject<ResidualDiagnostics>(json);
                 if (diag == null) return;
 
-                // (1) 正态概率图
-                var npModel = new PlotModel { Title = "正态概率图", TitleFontSize = 11, PlotMargins = new OxyThickness(50, 25, 15, 35) };
-                npModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "理论分位数", FontSize = 10 });
-                npModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "标准化残差", FontSize = 10 });
-                var npScatter = new ScatterSeries { MarkerType = MarkerType.Circle, MarkerSize = 3.5, MarkerFill = OxyColors.SteelBlue };
+                // (1) Normal Q-Q
+                var npModel = new PlotModel();
+                npModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Theoretical quantile" });
+                npModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Std residual" });
+                var npScatter = JmpScatter(0, 3);
                 for (int i = 0; i < diag.NormalProbability.TheoreticalQuantiles.Count; i++)
-                    npScatter.Points.Add(new ScatterPoint(diag.NormalProbability.TheoreticalQuantiles[i], diag.NormalProbability.OrderedResiduals[i]));
+                    npScatter.Points.Add(new ScatterPoint(
+                        diag.NormalProbability.TheoreticalQuantiles[i],
+                        diag.NormalProbability.OrderedResiduals[i]));
                 npModel.Series.Add(npScatter);
-                // 参考线 y=x
                 if (diag.NormalProbability.TheoreticalQuantiles.Count > 0)
                 {
                     double min = diag.NormalProbability.TheoreticalQuantiles.Min();
                     double max = diag.NormalProbability.TheoreticalQuantiles.Max();
-                    var refLine = new LineSeries { Color = OxyColors.Red, LineStyle = LineStyle.Dash, StrokeThickness = 1 };
+                    var refLine = JmpRefLine();
                     refLine.Points.Add(new DataPoint(min, min));
                     refLine.Points.Add(new DataPoint(max, max));
                     npModel.Series.Add(refLine);
                 }
+                ApplyJmpStyle(npModel);
                 NormalProbPlot = npModel;
 
-                // (2) 残差 vs 拟合值
-                var rvfModel = new PlotModel { Title = "残差 vs 拟合值", TitleFontSize = 11, PlotMargins = new OxyThickness(50, 25, 15, 35) };
-                rvfModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "拟合值", FontSize = 10 });
-                rvfModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "标准化残差", FontSize = 10 });
-                var rvfScatter = new ScatterSeries { MarkerType = MarkerType.Circle, MarkerSize = 3.5, MarkerFill = OxyColors.DarkOrange };
+                // (2) Residual vs Fitted
+                var rvfModel = new PlotModel();
+                rvfModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Fitted" });
+                rvfModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Std residual" });
+                var rvfScatter = JmpScatter(1, 3);
                 for (int i = 0; i < diag.ResidualsVsFitted.Fitted.Count; i++)
-                    rvfScatter.Points.Add(new ScatterPoint(diag.ResidualsVsFitted.Fitted[i], diag.ResidualsVsFitted.Residuals[i]));
+                    rvfScatter.Points.Add(new ScatterPoint(
+                        diag.ResidualsVsFitted.Fitted[i],
+                        diag.ResidualsVsFitted.Residuals[i]));
                 rvfModel.Series.Add(rvfScatter);
-                // 零线
                 if (diag.ResidualsVsFitted.Fitted.Count > 0)
                 {
-                    var zeroLine = new LineSeries { Color = OxyColors.Gray, LineStyle = LineStyle.Dash, StrokeThickness = 1 };
+                    var zeroLine = JmpRefLine();
                     zeroLine.Points.Add(new DataPoint(diag.ResidualsVsFitted.Fitted.Min(), 0));
                     zeroLine.Points.Add(new DataPoint(diag.ResidualsVsFitted.Fitted.Max(), 0));
                     rvfModel.Series.Add(zeroLine);
                 }
+                ApplyJmpStyle(rvfModel);
                 ResidVsFittedPlot = rvfModel;
 
-                // (3) 残差直方图
-                var histModel = new PlotModel { Title = "残差直方图", TitleFontSize = 11, PlotMargins = new OxyThickness(50, 25, 15, 35) };
-                histModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "标准化残差", FontSize = 10 });
-                histModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "频率", FontSize = 10, Minimum = 0 });
-                var histSeries = new RectangleBarSeries { StrokeThickness = 0.5, StrokeColor = OxyColors.Gray };
+                // (3) Histogram
+                var histModel = new PlotModel();
+                histModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Std residual" });
+                histModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Frequency", Minimum = 0 });
+                var histSeries = new RectangleBarSeries { StrokeThickness = 0.5, StrokeColor = OxyColor.FromRgb(200, 200, 200) };
                 for (int i = 0; i < diag.ResidualsHistogram.Frequencies.Count; i++)
                 {
-                    double x0 = diag.ResidualsHistogram.BinEdges[i];
-                    double x1 = diag.ResidualsHistogram.BinEdges[i + 1];
                     histSeries.Items.Add(new RectangleBarItem
                     {
-                        X0 = x0,
-                        X1 = x1,
+                        X0 = diag.ResidualsHistogram.BinEdges[i],
+                        X1 = diag.ResidualsHistogram.BinEdges[i + 1],
                         Y0 = 0,
                         Y1 = diag.ResidualsHistogram.Frequencies[i],
-                        Color = OxyColor.FromRgb(100, 149, 237)
+                        Color = OxyColor.FromArgb(180, 0x4A, 0x7F, 0xC4)
                     });
                 }
                 histModel.Series.Add(histSeries);
+                ApplyJmpStyle(histModel);
                 ResidHistogramPlot = histModel;
 
-                // (4) 残差 vs 观测顺序
-                var rvoModel = new PlotModel { Title = "残差 vs 观测顺序", TitleFontSize = 11, PlotMargins = new OxyThickness(50, 25, 15, 35) };
-                rvoModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "观测顺序", FontSize = 10 });
-                rvoModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "标准化残差", FontSize = 10 });
-                var rvoLine = new LineSeries { Color = OxyColors.SteelBlue, MarkerType = MarkerType.Circle, MarkerSize = 3, MarkerFill = OxyColors.SteelBlue };
+                // (4) Residual vs Order
+                var rvoModel = new PlotModel();
+                rvoModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Run order" });
+                rvoModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Std residual" });
+                var rvoLine = new LineSeries
+                {
+                    Color = JmpPalette[0],
+                    StrokeThickness = 1.2,
+                    MarkerType = MarkerType.Circle,
+                    MarkerSize = 2.5,
+                    MarkerFill = JmpPalette[0]
+                };
                 for (int i = 0; i < diag.ResidualsVsOrder.Order.Count; i++)
                     rvoLine.Points.Add(new DataPoint(diag.ResidualsVsOrder.Order[i], diag.ResidualsVsOrder.Residuals[i]));
                 rvoModel.Series.Add(rvoLine);
-                // 零线
                 if (diag.ResidualsVsOrder.Order.Count > 0)
                 {
-                    var zeroLine = new LineSeries { Color = OxyColors.Gray, LineStyle = LineStyle.Dash, StrokeThickness = 1 };
+                    var zeroLine = JmpRefLine();
                     zeroLine.Points.Add(new DataPoint(1, 0));
                     zeroLine.Points.Add(new DataPoint(diag.ResidualsVsOrder.Order.Max(), 0));
                     rvoModel.Series.Add(zeroLine);
                 }
+                ApplyJmpStyle(rvoModel);
                 ResidVsOrderPlot = rvoModel;
             }
             catch (Exception ex) { _logger.LogError(ex, "残差诊断图加载失败"); }
@@ -3311,20 +3257,33 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 IsLoading = true;
                 OlsStatusText = "正在进行 OLS 回归分析...";
+                StatusMessage = "正在进行 OLS 回归分析...";
+                var steps = new[] {
+            "Fit OLS model", "Regression equation", "Pareto effects",
+            "Residual diagnostics", "Response surface",
+            "Main effects", "Interaction effects",
+            "Outlier diagnostics", "Box-Cox analysis",
+            "Tukey HSD"
+        };
+                InitLoadingSteps(steps);
+                int totalSteps = steps.Length;
 
-                // ═══ Step 1: FitOLS ═══
-                OlsResult = await _analysisService.FitOlsDirectAsync(
-                    _directImportFactorsData,
-                    responsesData,
-                    _selectedResponseName,
-                    _directImportFactorTypes,
-                    "quadratic");
+                // Step 0: Fit OLS — 推到线程池
+                OlsResult = await Task.Run(() =>
+                    _analysisService.FitOlsDirectAsync(
+                        _directImportFactorsData,
+                        responsesData,
+                        _selectedResponseName,
+                        _directImportFactorTypes,
+                        "quadratic"));
 
                 if (OlsResult?.ModelSummary == null)
                 {
                     OlsStatusText = "OLS 分析返回空结果";
                     return;
                 }
+
+                await AdvanceLoadingStepAsync(0, totalSteps);
 
                 OlsStatusText = $"OLS 分析完成: R²={OlsResult.ModelSummary.RSquared:F4}, " +
                                  $"R²adj={OlsResult.ModelSummary.RSquaredAdj:F4}";
@@ -3333,7 +3292,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 InestimableWarning = OlsResult.InestimableWarning ?? "";
                 HasInestimableWarning = !string.IsNullOrEmpty(InestimableWarning);
 
-                // 连续因子列表（曲面图用）
+                // 连续因子列表
                 OlsContinuousFactors = _directImportFactorNames
                     .Where(f => _directImportFactorTypes.GetValueOrDefault(f, "continuous") == "continuous")
                     .ToList();
@@ -3343,39 +3302,48 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     OlsSurfaceFactor2 = OlsContinuousFactors[1];
                 }
 
-                // ═══ Step 2: 方程展示 ═══
+                // Step 1: 方程展示（UI线程）
                 UpdateEquationsDisplay(OlsResult);
+                await AdvanceLoadingStepAsync(1, totalSteps);
 
-                // ═══ Step 3: Pareto 图 ═══
-                await LoadDirectOlsParetoAsync();
+                // Step 2: Pareto
+                await Task.Run(() => LoadDirectOlsParetoAsync());
+                await AdvanceLoadingStepAsync(2, totalSteps);
 
-                // ═══ Step 4: 残差四合一 ═══
-                await LoadDirectResidualDiagnosticsAsync();
+                // Step 3: 残差四合一
+                await Task.Run(() => LoadDirectResidualDiagnosticsAsync());
+                await AdvanceLoadingStepAsync(3, totalSteps);
 
-                // ═══ Step 5: 响应曲面 + 等高线 ═══
-                await LoadDirectOlsSurfaceAsync();
+                // Step 4: 响应曲面
+                await Task.Run(() => LoadDirectOlsSurfaceAsync());
+                await AdvanceLoadingStepAsync(4, totalSteps);
 
-                // ═══ Step 6: 主效应图 ═══
-                await LoadDirectMainEffectsAsync();
+                // Step 5: 主效应
+                await Task.Run(() => LoadDirectMainEffectsAsync());
+                await AdvanceLoadingStepAsync(5, totalSteps);
 
-                // ═══ Step 7: 交互效应图 ═══
-                await LoadDirectInteractionEffectsAsync();
+                // Step 6: 交互效应
+                await Task.Run(() => LoadDirectInteractionEffectsAsync());
+                await AdvanceLoadingStepAsync(6, totalSteps);
 
-                // ═══ Step 8: 异常点分析 ═══
-                await LoadDirectOutlierAnalysisAsync();
+                // Step 7: 异常点
+                await Task.Run(() => LoadDirectOutlierAnalysisAsync());
+                await AdvanceLoadingStepAsync(7, totalSteps);
 
-                // ═══ Step 9: Box-Cox 分析 ═══
-                await LoadDirectBoxCoxAnalysisAsync();
+                // Step 8: Box-Cox
+                await Task.Run(() => LoadDirectBoxCoxAnalysisAsync());
+                await AdvanceLoadingStepAsync(8, totalSteps);
 
-                // ═══ Step 10: Tukey HSD（仅在有类别因子时） ═══
+                // Step 9: Tukey HSD
                 if (_directImportFactorTypes.Values.Any(v => v == "categorical"))
                 {
-                    await LoadDirectTukeyHSDAsync();
+                    await Task.Run(() => LoadDirectTukeyHSDAsync());
                 }
                 else
                 {
                     HasTukeyResult = false;
                 }
+                await AdvanceLoadingStepAsync(9, totalSteps);
 
                 OlsStatusText = $"OLS 分析完成: R²={OlsResult.ModelSummary.RSquared:F4}, " +
                                  $"R²adj={OlsResult.ModelSummary.RSquaredAdj:F4}, " +
@@ -3391,6 +3359,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 IsLoading = false;
             }
         }
+
 
         /// <summary>
         /// 直接导入模式下的 Pareto 图
@@ -3437,75 +3406,93 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 var json = await Task.Run(() =>
                     _analysisService.GetResidualDiagnosticsDirectAsync(_selectedResponseName));
-
                 var diag = JsonConvert.DeserializeObject<ResidualDiagnostics>(json);
                 if (diag == null) return;
 
-                // (1) 正态概率图
-                var npModel = new PlotModel { Title = "正态概率图", TitleFontSize = 11, PlotMargins = new OxyThickness(50, 25, 15, 35) };
-                npModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "理论分位数", FontSize = 10 });
-                npModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "标准化残差", FontSize = 10 });
-                var npScatter = new ScatterSeries { MarkerType = MarkerType.Circle, MarkerSize = 3.5, MarkerFill = OxyColors.SteelBlue };
+                // (1) Normal Q-Q
+                var npModel = new PlotModel();
+                npModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Theoretical quantile" });
+                npModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Std residual" });
+                var npScatter = JmpScatter(0, 3);
                 for (int i = 0; i < diag.NormalProbability.TheoreticalQuantiles.Count; i++)
-                    npScatter.Points.Add(new ScatterPoint(diag.NormalProbability.TheoreticalQuantiles[i], diag.NormalProbability.OrderedResiduals[i]));
+                    npScatter.Points.Add(new ScatterPoint(
+                        diag.NormalProbability.TheoreticalQuantiles[i],
+                        diag.NormalProbability.OrderedResiduals[i]));
                 npModel.Series.Add(npScatter);
                 if (diag.NormalProbability.TheoreticalQuantiles.Count > 0)
                 {
                     double min = diag.NormalProbability.TheoreticalQuantiles.Min();
                     double max = diag.NormalProbability.TheoreticalQuantiles.Max();
-                    var refLine = new LineSeries { Color = OxyColors.Red, LineStyle = LineStyle.Dash, StrokeThickness = 1 };
+                    var refLine = JmpRefLine();
                     refLine.Points.Add(new DataPoint(min, min));
                     refLine.Points.Add(new DataPoint(max, max));
                     npModel.Series.Add(refLine);
                 }
+                ApplyJmpStyle(npModel);
                 NormalProbPlot = npModel;
 
-                // (2) 残差 vs 拟合值
-                var rvfModel = new PlotModel { Title = "残差 vs 拟合值", TitleFontSize = 11, PlotMargins = new OxyThickness(50, 25, 15, 35) };
-                rvfModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "拟合值", FontSize = 10 });
-                rvfModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "标准化残差", FontSize = 10 });
-                var rvfScatter = new ScatterSeries { MarkerType = MarkerType.Circle, MarkerSize = 3.5, MarkerFill = OxyColors.DarkOrange };
+                // (2) Residual vs Fitted
+                var rvfModel = new PlotModel();
+                rvfModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Fitted" });
+                rvfModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Std residual" });
+                var rvfScatter = JmpScatter(1, 3);
                 for (int i = 0; i < diag.ResidualsVsFitted.Fitted.Count; i++)
-                    rvfScatter.Points.Add(new ScatterPoint(diag.ResidualsVsFitted.Fitted[i], diag.ResidualsVsFitted.Residuals[i]));
+                    rvfScatter.Points.Add(new ScatterPoint(
+                        diag.ResidualsVsFitted.Fitted[i], diag.ResidualsVsFitted.Residuals[i]));
                 rvfModel.Series.Add(rvfScatter);
                 if (diag.ResidualsVsFitted.Fitted.Count > 0)
                 {
-                    var zeroLine = new LineSeries { Color = OxyColors.Gray, LineStyle = LineStyle.Dash, StrokeThickness = 1 };
+                    var zeroLine = JmpRefLine();
                     zeroLine.Points.Add(new DataPoint(diag.ResidualsVsFitted.Fitted.Min(), 0));
                     zeroLine.Points.Add(new DataPoint(diag.ResidualsVsFitted.Fitted.Max(), 0));
                     rvfModel.Series.Add(zeroLine);
                 }
+                ApplyJmpStyle(rvfModel);
                 ResidVsFittedPlot = rvfModel;
 
-                // (3) 残差直方图
-                var histModel = new PlotModel { Title = "残差直方图", TitleFontSize = 11, PlotMargins = new OxyThickness(50, 25, 15, 35) };
-                histModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "标准化残差", FontSize = 10 });
-                histModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "频率", FontSize = 10, Minimum = 0 });
-                var histSeries = new RectangleBarSeries { StrokeThickness = 0.5, StrokeColor = OxyColors.Gray };
+                // (3) Histogram
+                var histModel = new PlotModel();
+                histModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Std residual" });
+                histModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Frequency", Minimum = 0 });
+                var histSeries = new RectangleBarSeries { StrokeThickness = 0.5, StrokeColor = OxyColor.FromRgb(200, 200, 200) };
                 for (int i = 0; i < diag.ResidualsHistogram.Frequencies.Count; i++)
                 {
-                    double x0 = diag.ResidualsHistogram.BinEdges[i];
-                    double x1 = diag.ResidualsHistogram.BinEdges[i + 1];
-                    histSeries.Items.Add(new RectangleBarItem { X0 = x0, X1 = x1, Y0 = 0, Y1 = diag.ResidualsHistogram.Frequencies[i], Color = OxyColor.FromRgb(100, 149, 237) });
+                    histSeries.Items.Add(new RectangleBarItem
+                    {
+                        X0 = diag.ResidualsHistogram.BinEdges[i],
+                        X1 = diag.ResidualsHistogram.BinEdges[i + 1],
+                        Y0 = 0,
+                        Y1 = diag.ResidualsHistogram.Frequencies[i],
+                        Color = OxyColor.FromArgb(180, 0x4A, 0x7F, 0xC4)
+                    });
                 }
                 histModel.Series.Add(histSeries);
+                ApplyJmpStyle(histModel);
                 ResidHistogramPlot = histModel;
 
-                // (4) 残差 vs 观测顺序
-                var rvoModel = new PlotModel { Title = "残差 vs 观测顺序", TitleFontSize = 11, PlotMargins = new OxyThickness(50, 25, 15, 35) };
-                rvoModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "观测顺序", FontSize = 10 });
-                rvoModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "标准化残差", FontSize = 10 });
-                var rvoLine = new LineSeries { Color = OxyColors.SteelBlue, MarkerType = MarkerType.Circle, MarkerSize = 3, MarkerFill = OxyColors.SteelBlue };
+                // (4) Residual vs Order
+                var rvoModel = new PlotModel();
+                rvoModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Run order" });
+                rvoModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Std residual" });
+                var rvoLine = new LineSeries
+                {
+                    Color = JmpPalette[0],
+                    StrokeThickness = 1.2,
+                    MarkerType = MarkerType.Circle,
+                    MarkerSize = 2.5,
+                    MarkerFill = JmpPalette[0]
+                };
                 for (int i = 0; i < diag.ResidualsVsOrder.Order.Count; i++)
                     rvoLine.Points.Add(new DataPoint(diag.ResidualsVsOrder.Order[i], diag.ResidualsVsOrder.Residuals[i]));
                 rvoModel.Series.Add(rvoLine);
                 if (diag.ResidualsVsOrder.Order.Count > 0)
                 {
-                    var zeroLine = new LineSeries { Color = OxyColors.Gray, LineStyle = LineStyle.Dash, StrokeThickness = 1 };
+                    var zeroLine = JmpRefLine();
                     zeroLine.Points.Add(new DataPoint(1, 0));
                     zeroLine.Points.Add(new DataPoint(diag.ResidualsVsOrder.Order.Max(), 0));
                     rvoModel.Series.Add(zeroLine);
                 }
+                ApplyJmpStyle(rvoModel);
                 ResidVsOrderPlot = rvoModel;
             }
             catch (Exception ex) { _logger.LogError(ex, "直接导入残差诊断图加载失败"); }
@@ -3513,6 +3500,8 @@ namespace MaxChemical.Modules.DOE.ViewModels
         // ═══ 直接导入模式: 响应曲面 ═══
         private async Task LoadDirectOlsSurfaceAsync()
         {
+            IsLoading = true;
+            StatusMessage = "正在生成响应曲面...";
             if (!IsDirectImportMode || string.IsNullOrEmpty(_selectedResponseName)) return;
             if (string.IsNullOrEmpty(OlsSurfaceFactor1) || string.IsNullOrEmpty(OlsSurfaceFactor2)
                 || OlsSurfaceFactor1 == OlsSurfaceFactor2) return;
@@ -3565,6 +3554,10 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 if (contourData?.Z != null) BuildContourPlot(contourData);
             }
             catch (Exception ex) { _logger.LogError(ex, "直接导入 OLS 响应曲面加载失败"); }
+            finally
+            {
+                IsLoading = false;
+            }
         }
 
         // ═══ 直接导入模式: 主效应图 ═══
@@ -3576,54 +3569,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 var json = await Task.Run(() =>
                     _analysisService.GetMainEffectsDirectAsync(_selectedResponseName));
                 var data = JsonConvert.DeserializeObject<Dictionary<string, List<MainEffectPoint>>>(json);
-                if (data == null || data.Count == 0) return;
-
-                var model = new PlotModel
-                {
-                    Title = "主效应图",
-                    TitleFontSize = 12,
-                    PlotMargins = new OxyThickness(50, 25, 15, 35)
-                };
-                model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = _selectedResponseName, FontSize = 10 });
-                model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "因子水平", FontSize = 10 });
-
-                var colors = new[] { OxyColors.Blue, OxyColors.Red, OxyColors.Green, OxyColors.Orange,
-                             OxyColors.Purple, OxyColors.Brown, OxyColors.DarkCyan };
-                int ci = 0;
-                double globalMean = data.Values.SelectMany(pts => pts).Average(p => p.Mean);
-                double xMin = double.MaxValue, xMax = double.MinValue;
-
-                foreach (var kv in data)
-                {
-                    var series = new LineSeries
-                    {
-                        Title = kv.Key,
-                        Color = colors[ci % colors.Length],
-                        MarkerType = MarkerType.Circle,
-                        MarkerSize = 5,
-                        StrokeThickness = 2
-                    };
-                    for (int i = 0; i < kv.Value.Count; i++)
-                    {
-                        var pt = kv.Value[i];
-                        double xVal = pt.Level is double d ? d
-                            : double.TryParse(pt.Level?.ToString(), out var parsed) ? parsed : i;
-                        series.Points.Add(new DataPoint(xVal, pt.Mean));
-                        xMin = Math.Min(xMin, xVal); xMax = Math.Max(xMax, xVal);
-                    }
-                    model.Series.Add(series); ci++;
-                }
-
-                if (xMin < xMax)
-                {
-                    var meanLine = new LineSeries { Color = OxyColors.Gray, LineStyle = LineStyle.Dash, StrokeThickness = 1 };
-                    meanLine.Points.Add(new DataPoint(xMin, globalMean));
-                    meanLine.Points.Add(new DataPoint(xMax, globalMean));
-                    model.Series.Add(meanLine);
-                }
-
-                model.Legends.Add(new Legend { LegendPosition = LegendPosition.RightTop, LegendFontSize = 10, IsLegendVisible = true });
-                OlsMainEffectsPlot = model;
+                BuildMainEffectsModel(data);
             }
             catch (Exception ex) { _logger.LogError(ex, "直接导入主效应图加载失败"); }
         }
@@ -3637,45 +3583,11 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 var json = await Task.Run(() =>
                     _analysisService.GetInteractionEffectsDirectAsync(_selectedResponseName));
                 var data = JsonConvert.DeserializeObject<List<InteractionEffectData>>(json);
-                if (data == null || data.Count == 0) return;
-
-                var first = data[0];
-                var model = new PlotModel
-                {
-                    Title = $"交互效应: {first.Factor1} × {first.Factor2}",
-                    TitleFontSize = 12,
-                    PlotMargins = new OxyThickness(50, 25, 15, 35)
-                };
-                model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = _selectedResponseName, FontSize = 10 });
-                model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = first.Factor1, FontSize = 10 });
-
-                var grouped = first.Data.GroupBy(d => d.F2?.ToString() ?? "").ToList();
-                var colors = new[] { OxyColors.Blue, OxyColors.Red, OxyColors.Green, OxyColors.Orange };
-                int ci = 0;
-
-                foreach (var group in grouped)
-                {
-                    var series = new LineSeries
-                    {
-                        Title = $"{first.Factor2}={group.Key}",
-                        Color = colors[ci % colors.Length],
-                        MarkerType = MarkerType.Circle,
-                        MarkerSize = 4,
-                        StrokeThickness = 2
-                    };
-                    foreach (var pt in group.OrderBy(p => p.F1 is double d ? d : double.TryParse(p.F1?.ToString(), out var parsed) ? parsed : 0.0))
-                    {
-                        double xVal = pt.F1 is double d ? d : double.TryParse(pt.F1?.ToString(), out var parsed) ? parsed : 0;
-                        series.Points.Add(new DataPoint(xVal, pt.Mean));
-                    }
-                    model.Series.Add(series); ci++;
-                }
-
-                model.Legends.Add(new Legend { LegendPosition = LegendPosition.RightTop, LegendFontSize = 10, IsLegendVisible = true });
-                OlsInteractionPlot = model;
+                BuildInteractionEffectsModel(data);
             }
             catch (Exception ex) { _logger.LogError(ex, "直接导入交互效应图加载失败"); }
         }
+
 
         // ═══ 直接导入模式: 异常点分析 ═══
         private async Task LoadDirectOutlierAnalysisAsync()
@@ -3784,6 +3696,62 @@ namespace MaxChemical.Modules.DOE.ViewModels
             }
         }
 
+        // ═══ Box-Cox λ 曲线构建辅助（批次+直接导入共用） ═══
+
+        private void BuildBoxCoxPlot(BoxCoxResult data)
+        {
+            if (data.LambdaProfile?.Lambdas == null) return;
+
+            var model = new PlotModel();
+            model.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "λ" });
+            model.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Log-likelihood" });
+
+            var line = new LineSeries { Color = JmpPalette[0], StrokeThickness = 1.5 };
+            for (int i = 0; i < data.LambdaProfile.Lambdas.Count; i++)
+            {
+                if (data.LambdaProfile.LogLikelihoods[i].HasValue)
+                    line.Points.Add(new DataPoint(data.LambdaProfile.Lambdas[i], data.LambdaProfile.LogLikelihoods[i]!.Value));
+            }
+            model.Series.Add(line);
+
+            // 最优 λ 标记
+            model.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
+            {
+                Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
+                X = data.OptimalLambda,
+                Color = OxyColor.FromRgb(198, 40, 40),
+                LineStyle = LineStyle.Dash,
+                StrokeThickness = 1.2,
+                Text = $"λ={data.OptimalLambda:F2}",
+                TextColor = OxyColor.FromRgb(198, 40, 40),
+                FontSize = 9
+            });
+
+            // CI 范围
+            if (data.LambdaCI != null && data.LambdaCI.Count == 2)
+            {
+                var ciColor = OxyColor.FromArgb(80, 0x4A, 0x7F, 0xC4);
+                model.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
+                {
+                    Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
+                    X = data.LambdaCI[0],
+                    Color = ciColor,
+                    LineStyle = LineStyle.Dot,
+                    StrokeThickness = 0.8
+                });
+                model.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
+                {
+                    Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
+                    X = data.LambdaCI[1],
+                    Color = ciColor,
+                    LineStyle = LineStyle.Dot,
+                    StrokeThickness = 0.8
+                });
+            }
+
+            ApplyJmpStyle(model);
+            BoxCoxProfilePlot = model;
+        }
         // ═══ 直接导入模式: Tukey HSD ═══
         private async Task LoadDirectTukeyHSDAsync()
         {
@@ -3993,12 +3961,9 @@ namespace MaxChemical.Modules.DOE.ViewModels
         {
             if (_lastProfilerData?.Factors == null) return;
 
-            // ★ 先清空旧的 PlotModel 引用
             DesirabilityPlots = new List<PlotModel>();
-
             var plots = new List<PlotModel>();
 
-            // 计算当前综合 D
             double currentCompositeD = ComputeDesirabilityForCurrentResponse(
                 _lastProfilerData.CurrentPredicted);
             DesirabilityCompositeD = currentCompositeD;
@@ -4007,39 +3972,24 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 if (!_lastProfilerData.Factors.TryGetValue(fname, out var fdata)) continue;
 
-                // ★ 计算当前因子值的显示文本
-                string dSubtitle = "";
-                if (fdata.IsCategorical)
-                {
-                    var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "";
-                    dSubtitle = curVal ?? "";
-                }
-                else
-                {
-                    dSubtitle = $"{fdata.CurrentNumericValue:F2}";
-                }
+                string dSubtitle = fdata.IsCategorical
+                    ? (_profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "") ?? ""
+                    : $"{fdata.CurrentNumericValue:F2}";
 
                 var pm = new PlotModel
                 {
                     Title = fname,
-                    TitleFontSize = 10,
-                    TitleColor = OxyColor.FromRgb(200, 0, 0),
-                    TitleHorizontalAlignment = TitleHorizontalAlignment.CenteredWithinView,
                     Subtitle = dSubtitle,
-                    SubtitleFontSize = 9,
-                    SubtitleColor = OxyColors.Red,
                     PlotMargins = new OxyThickness(50, 12, 10, 30)
                 };
 
                 pm.Axes.Add(new LinearAxis
                 {
                     Position = AxisPosition.Left,
-                    FontSize = 9,
                     Minimum = -0.05,
                     Maximum = 1.05,
                     MajorStep = 0.5,
-                    // ★ Feature 1: 只在第一个图显示 "意愿 0.xxxx" 标签
-                    Title = plots.Count == 0 ? $"意愿\n{currentCompositeD:F4}" : ""
+                    Title = plots.Count == 0 ? $"Desirability\n{currentCompositeD:F4}" : ""
                 });
 
                 if (fdata.IsCategorical)
@@ -4048,7 +3998,6 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     pm.Axes.Add(new LinearAxis
                     {
                         Position = AxisPosition.Bottom,
-                        FontSize = 9,
                         Minimum = -0.5,
                         Maximum = labels.Count - 0.5,
                         MajorStep = 1,
@@ -4060,11 +4009,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                         }
                     });
 
-                    var line = new LineSeries
-                    {
-                        Color = OxyColors.Black,       // ★ JMP 用黑色曲线
-                        StrokeThickness = 1.5
-                    };
+                    var line = new LineSeries { Color = OxyColor.FromRgb(26, 31, 54), StrokeThickness = 1.2 };
                     for (int i = 0; i < labels.Count && i < fdata.Y.Count; i++)
                     {
                         double d = ComputeDesirabilityForCurrentResponse(fdata.Y[i]);
@@ -4072,8 +4017,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     }
                     pm.Series.Add(line);
 
-                    // 红色虚线标记当前水平
-                    var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "";
+                    var curVal = _profilerCurrentValues.TryGetValue(fname, out var cvv) ? cvv?.ToString() : "";
                     int curIdx = labels.IndexOf(curVal ?? "");
                     if (curIdx >= 0)
                     {
@@ -4081,32 +4025,17 @@ namespace MaxChemical.Modules.DOE.ViewModels
                         {
                             Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
                             X = curIdx,
-                            Color = OxyColors.Red,
-                            LineStyle = LineStyle.Dash,
-                            StrokeThickness = 1.5,
-                            Text = curVal ?? "",
-                            TextColor = OxyColors.Red,
-                            FontSize = 9,
-                            FontWeight = OxyPlot.FontWeights.Bold,
-                            TextLinePosition = 0.5,
-                            TextOrientation = OxyPlot.Annotations.AnnotationTextOrientation.Horizontal,
-                            TextHorizontalAlignment = OxyPlot.HorizontalAlignment.Left
+                            Color = OxyColor.FromRgb(198, 40, 40),
+                            LineStyle = LineStyle.Solid,
+                            StrokeThickness = 1
                         });
                     }
                 }
                 else
                 {
-                    pm.Axes.Add(new LinearAxis
-                    {
-                        Position = AxisPosition.Bottom,
-                        FontSize = 9
-                    });
+                    pm.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom });
 
-                    var line = new LineSeries
-                    {
-                        Color = OxyColors.Black,       // ★ JMP 用黑色曲线
-                        StrokeThickness = 1.5
-                    };
+                    var line = new LineSeries { Color = OxyColor.FromRgb(26, 31, 54), StrokeThickness = 1.2 };
                     for (int i = 0; i < fdata.X.Count && i < fdata.Y.Count; i++)
                     {
                         double d = ComputeDesirabilityForCurrentResponse(fdata.Y[i]);
@@ -4114,34 +4043,32 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     }
                     pm.Series.Add(line);
 
-                    // 红色虚线
                     double curX = fdata.CurrentNumericValue;
                     pm.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
                     {
                         Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
                         X = curX,
-                        Color = OxyColors.Red,
-                        LineStyle = LineStyle.Dash,
-                        StrokeThickness = 1.5
+                        Color = OxyColor.FromRgb(198, 40, 40),
+                        LineStyle = LineStyle.Solid,
+                        StrokeThickness = 1
                     });
                 }
 
-                // 当前 D 值水平虚线
+                // D 值水平线
                 pm.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
                 {
                     Type = OxyPlot.Annotations.LineAnnotationType.Horizontal,
                     Y = currentCompositeD,
-                    Color = OxyColor.FromArgb(120, 255, 0, 0),
+                    Color = OxyColor.FromArgb(60, 198, 40, 40),
                     LineStyle = LineStyle.Dot,
-                    StrokeThickness = 1
+                    StrokeThickness = 0.8
                 });
 
+                ApplyJmpProfilerStyle(pm);
                 plots.Add(pm);
             }
 
-            // ★ 最右边: 意愿图（d(y) 曲线 + 3 个控制点）
             BuildDesirabilityFunctionPlot(plots, currentCompositeD);
-
             DesirabilityPlots = plots;
         }
         /// <summary>
@@ -4203,12 +4130,6 @@ namespace MaxChemical.Modules.DOE.ViewModels
         /// </summary>
         public void RefreshDesirabilityPlotsInPlace()
         {
-            _logger.LogInformation("意愿刷新: predicted={Pred:F4}, cfg.Lower={Lo}, cfg.Upper={Hi}, cfg.Target={T}, cfg.Goal={G}",
-    _lastProfilerData.CurrentPredicted,
-    _currentDesirabilityConfigs.FirstOrDefault()?.Lower,
-    _currentDesirabilityConfigs.FirstOrDefault()?.Upper,
-    _currentDesirabilityConfigs.FirstOrDefault()?.Target,
-    _currentDesirabilityConfigs.FirstOrDefault()?.Goal);
             if (_lastProfilerData?.Factors == null) return;
             if (DesirabilityPlots == null || DesirabilityPlots.Count == 0) return;
 
@@ -4222,7 +4143,8 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 if (!_lastProfilerData.Factors.TryGetValue(fname, out var fdata)) continue;
 
                 var pm = DesirabilityPlots[i];
-                // ★ 更新意愿行 Subtitle
+
+                // 更新 Subtitle
                 if (fdata.IsCategorical)
                 {
                     var curVal = _profilerCurrentValues.TryGetValue(fname, out var cv) ? cv?.ToString() : "";
@@ -4232,14 +4154,14 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 {
                     pm.Subtitle = $"{fdata.CurrentNumericValue:F2}";
                 }
+
                 pm.Series.Clear();
                 pm.Annotations.Clear();
 
-                // 重建曲线
                 if (fdata.IsCategorical)
                 {
                     var labels = fdata.X_Labels;
-                    var line = new LineSeries { Color = OxyColors.Black, StrokeThickness = 1.5 };
+                    var line = new LineSeries { Color = OxyColor.FromRgb(26, 31, 54), StrokeThickness = 1.2 };
                     for (int j = 0; j < labels.Count && j < fdata.Y.Count; j++)
                     {
                         double d = ComputeDesirabilityForCurrentResponse(fdata.Y[j]);
@@ -4255,16 +4177,15 @@ namespace MaxChemical.Modules.DOE.ViewModels
                         {
                             Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
                             X = curIdx,
-                            Color = OxyColors.Red,
-                            LineStyle = LineStyle.Dash,
-                            StrokeThickness = 1.5,
-                           
+                            Color = OxyColor.FromRgb(198, 40, 40),
+                            LineStyle = LineStyle.Solid,
+                            StrokeThickness = 1
                         });
                     }
                 }
                 else
                 {
-                    var line = new LineSeries { Color = OxyColors.Black, StrokeThickness = 1.5 };
+                    var line = new LineSeries { Color = OxyColor.FromRgb(26, 31, 54), StrokeThickness = 1.2 };
                     for (int j = 0; j < fdata.X.Count && j < fdata.Y.Count; j++)
                     {
                         double d = ComputeDesirabilityForCurrentResponse(fdata.Y[j]);
@@ -4277,16 +4198,9 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     {
                         Type = LineAnnotationType.Vertical,
                         X = curX,
-                        Color = OxyColors.Red,
-                        LineStyle = LineStyle.Dash,
-                        StrokeThickness = 1.5,
-                        Text = $"{curX:F0}",
-                        TextColor = OxyColors.Red,
-                        FontSize = 9,
-                        FontWeight = OxyPlot.FontWeights.Bold,
-                        TextLinePosition = 0.5,
-                        TextOrientation = AnnotationTextOrientation.Horizontal,
-                        TextHorizontalAlignment = HorizontalAlignment.Left
+                        Color = OxyColor.FromRgb(198, 40, 40),
+                        LineStyle = LineStyle.Solid,
+                        StrokeThickness = 1
                     });
                 }
 
@@ -4295,21 +4209,22 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 {
                     Type = LineAnnotationType.Horizontal,
                     Y = currentCompositeD,
-                    Color = OxyColor.FromArgb(120, 255, 0, 0),
+                    Color = OxyColor.FromArgb(60, 198, 40, 40),
                     LineStyle = LineStyle.Dot,
-                    StrokeThickness = 1
+                    StrokeThickness = 0.8
                 });
 
                 // 更新左侧标签
                 if (i == 0)
                 {
                     var yAxis = pm.Axes.FirstOrDefault(a => a.Position == AxisPosition.Left);
-                    if (yAxis != null) yAxis.Title = $"意愿{currentCompositeD:F4}";
+                    if (yAxis != null) yAxis.Title = $"Desirability\n{currentCompositeD:F4}";
                 }
 
                 pm.InvalidatePlot(true);
             }
         }
+
         /// <summary>
         /// ★ 构建最右边的意愿函数图（带可拖拽控制点）
         /// </summary>
@@ -4320,40 +4235,33 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
             var dPlot = new PlotModel
             {
-                Title = "意愿",
-                TitleFontSize = 10,
-                TitleColor = OxyColor.FromRgb(200, 0, 0),
-                PlotMargins = new OxyThickness(50, 5, 10, 30)
+                Title = "Desirability",
+                Subtitle = $"{currentCompositeD:F4}",
+                PlotMargins = new OxyThickness(50, 12, 10, 30)
             };
+
             dPlot.Axes.Add(new LinearAxis
             {
                 Position = AxisPosition.Left,
-                FontSize = 9,
                 Minimum = -0.05,
                 Maximum = 1.05
             });
 
             if (cfg != null)
             {
-                // Y 轴范围
                 double yMin = cfg.Lower - (cfg.Upper - cfg.Lower) * 0.1;
                 double yMax = cfg.Upper + (cfg.Upper - cfg.Lower) * 0.1;
 
                 dPlot.Axes.Add(new LinearAxis
                 {
                     Position = AxisPosition.Bottom,
-                    FontSize = 9,
                     Minimum = yMin,
                     Maximum = yMax,
                     Title = "y"
                 });
 
                 // d(y) 曲线
-                var curveSeries = new LineSeries
-                {
-                    Color = OxyColors.Black,
-                    StrokeThickness = 1.5
-                };
+                var curveSeries = new LineSeries { Color = OxyColor.FromRgb(26, 31, 54), StrokeThickness = 1.2 };
                 int nPts = 100;
                 for (int i = 0; i <= nPts; i++)
                 {
@@ -4363,82 +4271,70 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 }
                 dPlot.Series.Add(curveSeries);
 
-                // ★ v8: 控制点根据目标类型正确放置
+                // 控制点
                 var controlPoints = new ScatterSeries
                 {
                     MarkerType = MarkerType.Square,
-                    MarkerSize = 6,
+                    MarkerSize = 5,
                     MarkerFill = OxyColors.White,
-                    MarkerStroke = OxyColors.Black,
-                    MarkerStrokeThickness = 1.5
+                    MarkerStroke = OxyColor.FromRgb(96, 96, 96),
+                    MarkerStrokeThickness = 1
                 };
 
                 switch (cfg.Goal)
                 {
                     case DesirabilityGoal.Maximize:
-                        // Lower(d=0) → Target(d=1)
                         controlPoints.Points.Add(new ScatterPoint(cfg.Lower, 0));
                         controlPoints.Points.Add(new ScatterPoint(cfg.Target, 1));
                         break;
-
                     case DesirabilityGoal.Minimize:
-                        // Target(d=1) → Upper(d=0)
                         controlPoints.Points.Add(new ScatterPoint(cfg.Target, 1));
                         controlPoints.Points.Add(new ScatterPoint(cfg.Upper, 0));
                         break;
-
-                    default: // 望目
-                             // Lower(d=0) → Target(d=1) → Upper(d=0)
+                    default:
                         controlPoints.Points.Add(new ScatterPoint(cfg.Lower, 0));
                         controlPoints.Points.Add(new ScatterPoint(cfg.Target, 1));
                         controlPoints.Points.Add(new ScatterPoint(cfg.Upper, 0));
                         break;
                 }
-
                 dPlot.Series.Add(controlPoints);
 
                 // L / U 标注线
+                var ciColor = OxyColor.FromArgb(80, 0x4A, 0x7F, 0xC4);
                 dPlot.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
                 {
                     Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
                     X = cfg.Lower,
-                    Color = OxyColors.Green,
+                    Color = ciColor,
                     LineStyle = LineStyle.Dot,
-                    StrokeThickness = 1,
+                    StrokeThickness = 0.8,
                     Text = "L",
-                    TextColor = OxyColors.Green,
+                    TextColor = OxyColor.FromRgb(96, 96, 96),
                     FontSize = 8
                 });
                 dPlot.Annotations.Add(new OxyPlot.Annotations.LineAnnotation
                 {
                     Type = OxyPlot.Annotations.LineAnnotationType.Vertical,
                     X = cfg.Upper,
-                    Color = OxyColors.Blue,
+                    Color = ciColor,
                     LineStyle = LineStyle.Dot,
-                    StrokeThickness = 1,
+                    StrokeThickness = 0.8,
                     Text = "U",
-                    TextColor = OxyColors.Blue,
+                    TextColor = OxyColor.FromRgb(96, 96, 96),
                     FontSize = 8
                 });
             }
             else
             {
-                // 没有配置时: 对角线 + 当前 D 点
                 dPlot.Axes.Add(new LinearAxis
                 {
                     Position = AxisPosition.Bottom,
-                    FontSize = 9,
                     Minimum = 0,
                     Maximum = 1,
-                    Title = "意愿"
+                    Title = "D"
                 });
 
-                var diagLine = new LineSeries
-                {
-                    Color = OxyColors.LightGray,
-                    LineStyle = LineStyle.Dash,
-                    StrokeThickness = 1
-                };
+                var diagLine = JmpRefLine();
                 diagLine.Points.Add(new DataPoint(0, 0));
                 diagLine.Points.Add(new DataPoint(1, 1));
                 dPlot.Series.Add(diagLine);
@@ -4448,12 +4344,13 @@ namespace MaxChemical.Modules.DOE.ViewModels
             var marker = new ScatterSeries
             {
                 MarkerType = MarkerType.Circle,
-                MarkerSize = 6,
-                MarkerFill = OxyColors.DarkOrange
+                MarkerSize = 5,
+                MarkerFill = OxyColor.FromRgb(0xE8, 0xA5, 0x40)  // JmpPalette[3] 琥珀
             };
             marker.Points.Add(new ScatterPoint(currentCompositeD, currentCompositeD));
             dPlot.Series.Add(marker);
 
+            ApplyJmpProfilerStyle(dPlot);
             plots.Add(dPlot);
         }
         /// <summary>
@@ -4600,6 +4497,148 @@ namespace MaxChemical.Modules.DOE.ViewModels
             }
             catch { }
         }
+
+        #region OxyPlot JMP 统一样式
+
+        /// <summary>JMP 风格色板（最多6条系列）</summary>
+        private static readonly OxyColor[] JmpPalette = new[]
+        {
+    OxyColor.FromRgb(0x4A, 0x7F, 0xC4),  // 蓝
+    OxyColor.FromRgb(0xD4, 0x65, 0x4A),  // 红棕
+    OxyColor.FromRgb(0x5B, 0xA0, 0x5B),  // 绿
+    OxyColor.FromRgb(0xE8, 0xA5, 0x40),  // 琥珀
+    OxyColor.FromRgb(0x8B, 0x6D, 0xB5),  // 紫
+    OxyColor.FromRgb(0x6D, 0xAF, 0xB5),  // 青
+};
+
+        /// <summary>CI 填充色 (系列色 α=30)</summary>
+        private static OxyColor JmpCIFill(int seriesIndex = 0)
+        {
+            var c = JmpPalette[seriesIndex % JmpPalette.Length];
+            return OxyColor.FromArgb(45, c.R, c.G, c.B);
+        }
+
+        /// <summary>
+        /// 统一应用 JMP 风格到 PlotModel
+        /// 调用时机: 在 model.Series/Axes 都添加完之后
+        /// </summary>
+        private static void ApplyJmpStyle(PlotModel model)
+        {
+            // 去掉标题（由 XAML 折叠面板标题栏代替）
+            model.TitleFontSize = 0;
+            model.SubtitleFontSize = 0;
+
+            // 绘图区边框
+            model.PlotAreaBorderThickness = new OxyThickness(0.5);
+            model.PlotAreaBorderColor = OxyColor.FromRgb(200, 200, 200);
+
+            // 紧凑边距
+            model.PlotMargins = new OxyThickness(48, 8, 12, 32);
+
+            // 轴样式
+            foreach (var axis in model.Axes)
+            {
+                axis.AxislineColor = OxyColor.FromRgb(200, 200, 200);
+                axis.AxislineThickness = 0.5;
+                axis.TickStyle = TickStyle.Outside;
+                axis.MajorTickSize = 3;
+                axis.MinorTickSize = 0;
+                axis.MajorGridlineStyle = LineStyle.Dot;
+                axis.MajorGridlineColor = OxyColor.FromRgb(232, 232, 232);
+                axis.MajorGridlineThickness = 0.5;
+                axis.MinorGridlineStyle = LineStyle.None;
+                axis.FontSize = 9;
+                axis.TextColor = OxyColor.FromRgb(128, 128, 128);
+                axis.TitleFontSize = 10;
+                axis.TitleColor = OxyColor.FromRgb(96, 96, 96);
+            }
+        }
+
+        /// <summary>
+        /// Profiler 专用样式（保留 Title/Subtitle 用于因子名和当前值）
+        /// </summary>
+        private static void ApplyJmpProfilerStyle(PlotModel model)
+        {
+            model.PlotAreaBorderThickness = new OxyThickness(0.5);
+            model.PlotAreaBorderColor = OxyColor.FromRgb(200, 200, 200);
+            model.PlotMargins = new OxyThickness(48, 20, 10, 30);
+
+            // 标题保留（因子名），但缩小
+            model.TitleFontSize = 10;
+            model.TitleColor = OxyColor.FromRgb(26, 31, 54);
+            model.SubtitleFontSize = 10;
+            model.SubtitleColor = OxyColor.FromRgb(198, 40, 40); // 红色当前值
+
+            foreach (var axis in model.Axes)
+            {
+                axis.AxislineColor = OxyColor.FromRgb(200, 200, 200);
+                axis.AxislineThickness = 0.5;
+                axis.TickStyle = TickStyle.Outside;
+                axis.MajorTickSize = 3;
+                axis.MinorTickSize = 0;
+                axis.MajorGridlineStyle = LineStyle.None; // profiler 不要网格线
+                axis.MinorGridlineStyle = LineStyle.None;
+                axis.FontSize = 9;
+                axis.TextColor = OxyColor.FromRgb(128, 128, 128);
+                axis.TitleFontSize = 9;
+                axis.TitleColor = OxyColor.FromRgb(96, 96, 96);
+            }
+        }
+
+        /// <summary>创建 JMP 风格的 LineSeries</summary>
+        private static LineSeries JmpLine(int seriesIndex, string title = "", double thickness = 1.5)
+        {
+            return new LineSeries
+            {
+                Color = JmpPalette[seriesIndex % JmpPalette.Length],
+                StrokeThickness = thickness,
+                MarkerType = MarkerType.Circle,
+                MarkerSize = 3,
+                MarkerFill = JmpPalette[seriesIndex % JmpPalette.Length],
+                Title = title
+            };
+        }
+
+        /// <summary>创建 JMP 风格的 ScatterSeries</summary>
+        private static ScatterSeries JmpScatter(int seriesIndex, double size = 3)
+        {
+            return new ScatterSeries
+            {
+                MarkerType = MarkerType.Circle,
+                MarkerSize = size,
+                MarkerFill = JmpPalette[seriesIndex % JmpPalette.Length]
+            };
+        }
+
+        /// <summary>参考线（y=x, 零线等）</summary>
+        private static LineSeries JmpRefLine()
+        {
+            return new LineSeries
+            {
+                Color = OxyColor.FromRgb(176, 176, 176),
+                LineStyle = LineStyle.Dash,
+                StrokeThickness = 0.8
+            };
+        }
+
+        /// <summary>JMP 风格图例</summary>
+        private static Legend JmpLegend()
+        {
+            return new Legend
+            {
+                LegendPosition = LegendPosition.RightTop,
+                LegendPlacement = LegendPlacement.Inside,
+                LegendFontSize = 9,
+                LegendTextColor = OxyColor.FromRgb(96, 96, 96),
+                LegendBorder = OxyColors.Transparent,
+                LegendBackground = OxyColor.FromArgb(220, 255, 255, 255),
+                LegendPadding = 4,
+                LegendMargin = 4,
+                IsLegendVisible = true
+            };
+        }
+
+        #endregion
         public class SavedSolution
         {
             public int SolutionId { get; set; }
@@ -4947,6 +4986,8 @@ namespace MaxChemical.Modules.DOE.ViewModels
             public double TValue { get; set; }
             public double PValue { get; set; }
             public double? VIF { get; set; }
+            /// <summary>p &lt; 0.05 标红</summary>
+            public bool IsSignificant => PValue < 0.05;
         }
         // ── Tukey HSD ──
 
@@ -4966,7 +5007,26 @@ namespace MaxChemical.Modules.DOE.ViewModels
             public string CIText => $"[{CILower:F2}, {CIUpper:F2}]";
             public string SignificanceMarker => Significant ? "★" : "";
         }
+        public class LoadingStepItem : BindableBase
+        {
+            public string StepName { get; set; } = "";
 
+            private bool _isCompleted;
+            public bool IsCompleted
+            {
+                get => _isCompleted;
+                set { if (SetProperty(ref _isCompleted, value)) { RaisePropertyChanged(nameof(IsPending)); RaisePropertyChanged(nameof(IsActive)); } }
+            }
+
+            private bool _isActive;
+            public bool IsActive
+            {
+                get => _isActive;
+                set { if (SetProperty(ref _isActive, value)) { RaisePropertyChanged(nameof(IsPending)); RaisePropertyChanged(nameof(IsCompleted)); } }
+            }
+
+            public bool IsPending => !IsCompleted && !IsActive;
+        }
         // 反序列化用
         private class TukeyHSDResult
         {

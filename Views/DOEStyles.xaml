@@ -1,9 +1,10 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:local="clr-namespace:MaxChemical.Modules.DOE.Converters">
 
     <!-- ═══ 转换器 ═══ -->
     <BooleanToVisibilityConverter x:Key="BoolToVis"/>
-
+    <local:StringNotEmptyToVisibilityConverter x:Key="StringToVis"/>
     <!-- ═══ 配色体系 ═══ -->
     <SolidColorBrush x:Key="TitleBarBrush">#003A96</SolidColorBrush>
     <SolidColorBrush x:Key="PrimaryBrush">#0078D4</SolidColorBrush>

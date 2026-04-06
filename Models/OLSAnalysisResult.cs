@@ -90,6 +90,7 @@ namespace MaxChemical.Modules.DOE.Models
         public double? MS { get; set; }
         public double? FValue { get; set; }
         public double? PValue { get; set; }
+        public bool IsSignificant => PValue.HasValue && PValue.Value < 0.05;
     }
 
     /// <summary>

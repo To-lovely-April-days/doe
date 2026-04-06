@@ -39,7 +39,7 @@ namespace MaxChemical.Modules.DOE.Services
         /// <param name="flowId">流程 ID</param>
         /// <param name="factors">因子列表</param>
         /// <param name="responses">响应变量列表（第一个为主响应）</param>
-        Task InitializeAsync(string flowId, List<DOEFactor> factors, List<DOEResponse> responses);
+        Task InitializeAsync(string flowId, List<DOEFactor> factors, List<DOEResponse> responses, string? projectId = null);
 
         /// <summary>
         /// 向所有响应模型追加一组实验数据。

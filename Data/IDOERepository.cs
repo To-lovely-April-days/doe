@@ -164,6 +164,8 @@ namespace MaxChemical.Modules.DOE.Data
         Task<string?> GetDesirabilityConfigJsonAsync(string batchId);
         Task SaveOlsResultAsync(string batchId, string responseName, string resultJson);
         Task<string?> GetOlsResultJsonAsync(string batchId, string responseName);
+        /// <summary>获取项目下所有 GPR 模型</summary>
+        Task<List<GPRModelState>> GetGPRModelsByProjectAsync(string projectId);
     }
 
     /// <summary>

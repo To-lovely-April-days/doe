@@ -44,6 +44,7 @@ namespace MaxChemical.Modules.DOE.Services
         private string _primaryResponseName = "";
         private List<string> _allResponseNames = new();
         private string _flowId = "";
+        private string? _projectId;
         private string _baseSignature = "";
         private List<DOEFactor> _factors = new();
 
@@ -79,11 +80,11 @@ namespace MaxChemical.Modules.DOE.Services
 
         // ══════════════ 初始化 ══════════════
 
-        public async Task InitializeAsync(string flowId, List<DOEFactor> factors, List<DOEResponse> responses)
+        public async Task InitializeAsync(string flowId, List<DOEFactor> factors, List<DOEResponse> responses, string? projectId = null)
         {
             _flowId = flowId;
             _factors = factors;
-
+            _projectId = projectId;
             if (responses.Count == 0)
             {
                 _logger.LogWarning("MultiResponseGPR: 没有响应变量，跳过初始化");
@@ -423,6 +424,7 @@ namespace MaxChemical.Modules.DOE.Services
                     var state = new GPRModelState
                     {
                         FlowId = flowId,
+                        ProjectId = _projectId,             // ★ 新增
                         FactorSignature = secondarySig,
                         ModelName = $"次要模型-{kv.Key}",
                         ModelStateBytes = modelBytes,

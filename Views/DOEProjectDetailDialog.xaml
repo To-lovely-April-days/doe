@@ -1,0 +1,301 @@
+﻿<Window x:Class="MaxChemical.Modules.DOE.Views.DOEProjectDetailDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="项目详情" Width="780" Height="540"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None" AllowsTransparency="True"
+        Background="Transparent" ResizeMode="NoResize">
+
+    <Window.Resources>
+        <ResourceDictionary Source="DOEStyles.xaml"/>
+    </Window.Resources>
+
+    <Border CornerRadius="12" Background="White" BorderBrush="#D8DCE3" BorderThickness="1" Margin="8"
+       >
+        <Border.Effect>
+            <DropShadowEffect Color="#000" Direction="270" ShadowDepth="4" BlurRadius="20" Opacity="0.10"/>
+        </Border.Effect>
+
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="300"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- ═══ 左侧：项目概况 ═══ -->
+            <Border Grid.Column="0" BorderBrush="#E8EAED" BorderThickness="0,0,1,0">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="22,22,22,16">
+
+                        <!-- 标题行 -->
+                        <Grid Margin="0,0,0,18" Background="Transparent" 
+                              MouseLeftButtonDown="TitleBar_MouseDown">
+                            <TextBlock Text="项目详情" FontSize="16" FontWeight="Medium" Foreground="#1A1F36"/>
+                            <Button HorizontalAlignment="Right" VerticalAlignment="Top" Cursor="Hand"
+                                    Click="CloseBtn_Click">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <TextBlock x:Name="Txt" Text="×" FontSize="16" Foreground="#A0A4B0"/>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Txt" Property="Foreground" Value="#1A1F36"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+                        </Grid>
+
+                        <!-- 项目名 + 阶段 -->
+                        <TextBlock Text="{Binding ProjectName}" FontSize="15" FontWeight="Medium"
+                                   Foreground="#1A1F36" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,0">
+                            <Border CornerRadius="4" Padding="8,2" Margin="0,0,6,0">
+                                <Border.Background>
+                                    <SolidColorBrush Color="{Binding PhaseColor}" Opacity="0.12"/>
+                                </Border.Background>
+                                <TextBlock Text="{Binding PhaseText}" FontSize="10" FontWeight="SemiBold">
+                                    <TextBlock.Foreground>
+                                        <SolidColorBrush Color="{Binding PhaseColor}"/>
+                                    </TextBlock.Foreground>
+                                </TextBlock>
+                            </Border>
+                            <TextBlock Text="{Binding StatusText}" FontSize="11" Foreground="#22A06B"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <!-- 分隔线 -->
+                        <Border Height="1" Background="#E8EAED" Margin="0,16,0,16"/>
+
+                        <!-- 最优值 -->
+                        <TextBlock Text="当前最优" FontSize="10" Foreground="#A0A4B0" Margin="0,0,0,2"/>
+                        <TextBlock Text="{Binding BestValueText}" FontSize="34" FontWeight="Medium"
+                                   Foreground="#0078D4" Margin="0,0,0,14"/>
+
+                        <!-- 最优因子组合 -->
+                        <ItemsControl ItemsSource="{Binding BestFactorItems}" Margin="0,0,0,0">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Margin="0,0,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding Name}" FontSize="12" Foreground="#A0A4B0"
+                                                   Padding="0,5"/>
+                                        <TextBlock Grid.Column="1" Text="{Binding Value}" FontSize="12"
+                                                   FontWeight="Medium" Foreground="#1A1F36" Padding="0,5"/>
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <!-- 分隔线 -->
+                        <Border Height="1" Background="#E8EAED" Margin="0,16,0,16"/>
+
+                        <!-- 进度条 -->
+                        <ItemsControl ItemsSource="{Binding PhaseSegments}" Margin="0,0,0,4">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <StackPanel Orientation="Horizontal"/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Width="40" Height="4" CornerRadius="2" Margin="0,0,2,0"
+                                            Background="{Binding Color}"/>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock Text="{Binding PhaseProgressText}" FontSize="10"
+                                   Foreground="#A0A4B0" Margin="0,4,0,0"/>
+
+                        <!-- 分隔线 -->
+                        <Border Height="1" Background="#E8EAED" Margin="0,16,0,16"/>
+
+                        <!-- 基础信息 -->
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="优化目标" FontSize="12" Foreground="#A0A4B0" Padding="0,4"/>
+                            <TextBlock Grid.Column="1" Text="{Binding ObjectiveDescription}" FontSize="12"
+                                       Foreground="#1A1F36" Padding="0,4"/>
+                        </Grid>
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="总实验" FontSize="12" Foreground="#A0A4B0" Padding="0,4"/>
+                            <TextBlock Grid.Column="1" FontSize="12" Foreground="#1A1F36" Padding="0,4">
+                                <Run Text="{Binding TotalExperiments, Mode=OneWay}"/>
+                                <Run Text=" 组 / "/>
+                                <Run Text="{Binding CompletedRounds, Mode=OneWay}"/>
+                                <Run Text=" 轮"/>
+                            </TextBlock>
+                        </Grid>
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="创建时间" FontSize="12" Foreground="#A0A4B0" Padding="0,4"/>
+                            <TextBlock Grid.Column="1" Text="{Binding CreatedTime, StringFormat='{}{0:yyyy-MM-dd}'}"
+                                       FontSize="12" Foreground="#1A1F36" Padding="0,4"/>
+                        </Grid>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="最后更新" FontSize="12" Foreground="#A0A4B0" Padding="0,4"/>
+                            <TextBlock Grid.Column="1" Text="{Binding UpdatedTime, StringFormat='{}{0:yyyy-MM-dd}'}"
+                                       FontSize="12" Foreground="#1A1F36" Padding="0,4"/>
+                        </Grid>
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+
+            <!-- ═══ 右侧：因子 + 模型 + 批次 ═══ -->
+            <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
+                <StackPanel Margin="22">
+
+                    <!-- ── 因子池（三列表格） ── -->
+                    <TextBlock Text="因子池" FontSize="12" FontWeight="Medium" Foreground="#1A1F36" Margin="0,0,0,10"/>
+                    <Border BorderBrush="#E8EAED" BorderThickness="1" CornerRadius="8" Margin="0,0,0,22">
+                        <!-- 表头 -->
+                        <StackPanel>
+                            <Grid Background="#FAFBFC">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="80"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="因子" FontSize="10" Foreground="#A0A4B0" Padding="14,7"/>
+                                <TextBlock Grid.Column="1" Text="范围" FontSize="10" Foreground="#A0A4B0" Padding="0,7"/>
+                                <TextBlock Grid.Column="2" Text="状态" FontSize="10" Foreground="#A0A4B0"
+                                           HorizontalAlignment="Right" Padding="0,7,14,7"/>
+                            </Grid>
+                            <!-- 表格行 -->
+                            <ItemsControl ItemsSource="{Binding FactorTableItems}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border BorderBrush="#E8EAED" BorderThickness="0,1,0,0">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Opacity" Value="1"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsActive}" Value="False">
+                                                            <Setter Property="Opacity" Value="0.45"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="80"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="{Binding Name}" FontSize="11" Foreground="#1A1F36"
+                                                           FontWeight="Medium" Padding="14,8">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsActive}" Value="False">
+                                                                    <Setter Property="TextDecorations" Value="Strikethrough"/>
+                                                                    <Setter Property="Foreground" Value="#8A8F9C"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                                <TextBlock Grid.Column="1" Text="{Binding Range}" FontSize="11"
+                                                           Foreground="#8A8F9C" Padding="0,8"/>
+                                                <TextBlock Grid.Column="2" Text="{Binding Status}" FontSize="10"
+                                                           Foreground="#A0A4B0" HorizontalAlignment="Right"
+                                                           Padding="0,8,14,8"/>
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- ── GPR 模型 ── -->
+                    <TextBlock Text="GPR 模型" FontSize="12" FontWeight="Medium" Foreground="#1A1F36" Margin="0,0,0,10"/>
+                    <ItemsControl ItemsSource="{Binding ModelItems}" Margin="0,0,0,22">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="#FAFBFC" CornerRadius="6" Padding="14,10" Margin="0,0,0,5">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="Medium"
+                                                       Foreground="#1A1F36"/>
+                                            <TextBlock Text="{Binding Description}" FontSize="10"
+                                                       Foreground="#A0A4B0" Margin="0,2,0,0"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="1" HorizontalAlignment="Right">
+                                            <TextBlock Text="{Binding RSquaredText}" FontSize="16" FontWeight="Medium"
+                                                       Foreground="#0D7A3E" HorizontalAlignment="Right"/>
+                                            <TextBlock Text="R²" FontSize="9" Foreground="#A0A4B0"
+                                                       HorizontalAlignment="Right"/>
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <!-- ── 批次历史 ── -->
+                    <TextBlock Text="批次历史" FontSize="12" FontWeight="Medium" Foreground="#1A1F36" Margin="0,0,0,10"/>
+                    <ItemsControl ItemsSource="{Binding BatchItems}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="#FAFBFC" CornerRadius="6" Padding="12,8" Margin="0,0,0,5">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="28"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding RoundLabel}" FontSize="11" FontWeight="Medium"
+                                                   Foreground="#1A1F36" VerticalAlignment="Center"/>
+                                        <Border Grid.Column="1" CornerRadius="3" Padding="7,2" Margin="0,0,10,0"
+                                                VerticalAlignment="Center">
+                                            <Border.Background>
+                                                <SolidColorBrush Color="{Binding PhaseColor}" Opacity="0.12"/>
+                                            </Border.Background>
+                                            <TextBlock Text="{Binding PhaseText}" FontSize="9" FontWeight="SemiBold">
+                                                <TextBlock.Foreground>
+                                                    <SolidColorBrush Color="{Binding PhaseColor}"/>
+                                                </TextBlock.Foreground>
+                                            </TextBlock>
+                                        </Border>
+                                        <TextBlock Grid.Column="2" Text="{Binding MethodAndRuns}" FontSize="11"
+                                                   Foreground="#8A8F9C" VerticalAlignment="Center"/>
+                                        <TextBlock Grid.Column="3" Text="{Binding RSquaredText}" FontSize="11"
+                                                   FontWeight="Medium" Foreground="#0D7A3E"
+                                                   VerticalAlignment="Center" Margin="0,0,12,0"/>
+                                        <TextBlock Grid.Column="4" Text="{Binding DateText}" FontSize="10"
+                                                   Foreground="#A0A4B0" VerticalAlignment="Center" MinWidth="36"
+                                                   TextAlignment="Right"/>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </Border>
+</Window>

@@ -105,6 +105,8 @@ namespace MaxChemical.Modules.DOE.Services
                         string source = "measured", string batchName = "", string timestamp = "");
         void AppendData(Dictionary<string, double> factorValues, double responseValue,
                         string source = "measured", string batchName = "", string timestamp = "");
+        /// <summary>设置当前关联的项目 ID</summary>
+        void SetProjectId(string? projectId);
     }
 
     public class GPRTrainResult

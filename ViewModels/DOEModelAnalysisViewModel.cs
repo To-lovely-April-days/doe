@@ -3918,39 +3918,72 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 DesirabilityPlots = new List<PlotModel>();
             }
         }
-        private async Task BuildDesirabilityPlotsAsync()
+        /// <summary>
+        /// 从外部直接跳转到 OLS 分析指定批次
+        /// （历史页"查看分析"按钮调用）
+        /// </summary>
+        public async Task NavigateToOlsBatchAsync(string batchId)
         {
-            // 需要从 Python 获取含 desirability 数据的 profile
-            // profile_plot_data 已经返回了每个因子的 composite_d 和各响应的 desirabilities
-
-            string json;
             try
             {
-                var fixedValues = new Dictionary<string, object>(_profilerCurrentValues);
+                IsLoading = true;
 
-                if (IsOlsTabSelected)
+                // 切换到 OLS Tab
+                IsGprTabSelected = false;
+
+                // 加载批次列表
+                await LoadOlsBatchListAsync();
+
+                // 在批次列表中找到目标批次并选中
+                var target = OlsBatchItems.FirstOrDefault(b => b.BatchId == batchId);
+                if (target != null)
                 {
-                    // OLS 模式需要通过 DesirabilityService 获取 profile 数据
-                    // 暂时用已缓存的 _lastProfilerData（它没有 desirability 数据）
-                    // 需要额外调用 DesirabilityEngine.profile_plot_data
-
-                    // TODO: 在 DesirabilityService 中新增 GetOlsProfileDataAsync
-                    // 暂时构建占位图
+                    await SelectOlsBatchAsync(target);
                 }
                 else
                 {
-                    json = await _desirabilityService.GetProfileDataAsync(50);
+                    // 批次不在列表中（可能是不同 FlowId），直接用 BatchId 加载
+                    var batch = await _repository.GetBatchWithDetailsAsync(batchId);
+                    if (batch != null)
+                    {
+                        _currentBatchId = batchId;
+                        _currentFlowId = batch.FlowId;
+
+                        // 更新因子和响应名
+                        FactorNames = batch.Factors.Select(f => f.FactorName).ToList();
+                        ResponseNames = batch.Responses.Select(r => r.ResponseName).ToList();
+                        _selectedResponseName = ResponseNames.FirstOrDefault() ?? "";
+                        RaisePropertyChanged(nameof(SelectedResponseName));
+
+                        // 构造一个 OlsBatchItem 并选中
+                        var item = new OlsBatchItem
+                        {
+                            BatchId = batch.BatchId,
+                            BatchName = batch.BatchName,
+                            DesignMethod = batch.DesignMethod.ToString(),
+                            CompletedCount = batch.Runs?.Count(r => r.Status == DOERunStatus.Completed) ?? 0,
+                            FactorCount = batch.Factors?.Count ?? 0,
+                            IsSelected = true
+                        };
+
+                        // 加到列表头部
+                        OlsBatchItems.Insert(0, item);
+                        SelectedOlsBatch = item;
+
+                        // 执行 OLS 分析
+                        await RefreshOlsAnalysisAsync();
+                    }
                 }
             }
-            catch { return; }
-
-            // 从 _lastProfilerData 中提取 composite_d（如果有的话）
-            // 由于当前 _lastProfilerData 来自 DOEAnalyzer.prediction_profiler，
-            // 不含 desirability 数据。需要额外调用 DesirabilityEngine。
-            // 
-            // 简化方案: 用已拟合的 OLS 模型 + DesirabilityConfig 在 C# 端计算 d(y)
-
-            BuildDesirabilityPlotsFromProfiler();
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "跳转 OLS 分析失败: {BatchId}", batchId);
+                OlsStatusText = $"加载失败: {ex.Message}";
+            }
+            finally
+            {
+                IsLoading = false;
+            }
         }
 
         /// <summary>

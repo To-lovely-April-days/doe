@@ -1,13 +1,14 @@
+using MaxChemical.Modules.DOE.Events;
+using MaxChemical.Modules.DOE.ViewModels;
+using Prism.Events;
+using Prism.Ioc;
 using System;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
-using MaxChemical.Modules.DOE.Events;
-using MaxChemical.Modules.DOE.ViewModels;
-using Prism.Events;
-using Prism.Ioc;
 
 namespace MaxChemical.Modules.DOE.Views
 {
@@ -26,7 +27,13 @@ namespace MaxChemical.Modules.DOE.Views
         private const double MINI_HEIGHT = 240;
         private static readonly Duration AnimDuration = new(TimeSpan.FromMilliseconds(300));
         private static readonly CubicEase AnimEase = new() { EasingMode = EasingMode.EaseInOut };
-
+        private static readonly string[] LoadingMessages = new[]
+{
+    "正在启动 Python 运行时...",
+    "正在加载统计分析引擎...",
+    "正在初始化 GPR 模型服务...",
+    "正在加载项目数据..."
+};
         public DOEMainView(DOEMainViewModel mainVm, IContainerProvider container)
         {
             InitializeComponent();
@@ -82,8 +89,13 @@ namespace MaxChemical.Modules.DOE.Views
                                 await _execVm.LoadBatchAsync(_mainVm.CurrentBatchId);
                             break;
                         case 2:
-                            if (_modelAnalysisVm != null)
+                            // ★ 如果是从历史页跳转过来（CurrentBatchId 已设置），
+                            //    不重复加载，NavigateToOlsBatchAsync 已经处理了
+                            //    只有手动点 Tab 且没有 CurrentBatchId 时才 LoadAsync
+                            if (_modelAnalysisVm != null && string.IsNullOrEmpty(_mainVm?.CurrentBatchId))
+                            {
                                 await _modelAnalysisVm.LoadAsync();
+                            }
                             break;
                         case 3:
                             if (_historyVm != null) await _historyVm.LoadBatchesAsync();
@@ -103,6 +115,8 @@ namespace MaxChemical.Modules.DOE.Views
             {
                 LoadingOverlay.Visibility = Visibility.Visible;
 
+                // ── Step 1: Python 运行时 ──
+                UpdateLoadingStep(0);
                 await Task.Run(() =>
                 {
                     try
@@ -113,57 +127,50 @@ namespace MaxChemical.Modules.DOE.Views
                     catch { }
                 });
 
+                // ── Step 2: 统计分析引擎 ──
+                UpdateLoadingStep(1);
                 _overviewVm = container.Resolve<DOEOverviewViewModel>();
                 _execVm = container.Resolve<DOEExecutionDashboardViewModel>();
+
+                // ── Step 3: GPR 模型服务 ──
+                UpdateLoadingStep(2);
                 _modelAnalysisVm = container.Resolve<DOEModelAnalysisViewModel>();
                 _historyVm = container.Resolve<DOEHistoryViewModel>();
+
+                // ── Step 4: 项目数据 ──
+                UpdateLoadingStep(3);
 
                 OverviewView.DataContext = _overviewVm;
                 ExecutionView.DataContext = _execVm;
                 ModelAnalysisView.DataContext = _modelAnalysisVm;
                 HistoryView.DataContext = _historyVm;
-
-                // 迷你面板绑定到执行 ViewModel
                 MiniPanel.DataContext = _execVm;
 
-                // 监听迷你模式切换
                 _execVm.PropertyChanged += (s, e) =>
                 {
                     if (e.PropertyName == nameof(DOEExecutionDashboardViewModel.IsMiniMode))
                     {
-                        if (_execVm.IsMiniMode)
-                            SwitchToMiniMode();
-                        else
-                            SwitchToNormalMode();
+                        if (_execVm.IsMiniMode) SwitchToMiniMode();
+                        else SwitchToNormalMode();
                     }
                 };
 
-                // ── 事件订阅: MainViewModel → 子页面 ──
-
                 mainVm.RequestLoadExecution += async (s, id) =>
                 {
-                    if (_execVm != null)
-                        await _execVm.LoadBatchAsync(id);
+                    if (_execVm != null) await _execVm.LoadBatchAsync(id);
                 };
-
                 mainVm.RequestLoadAnalysis += async (s, id) =>
                 {
-                    if (_modelAnalysisVm != null)
-                        await _modelAnalysisVm.LoadBatchAsync(id);
+                    if (_modelAnalysisVm != null) await _modelAnalysisVm.LoadBatchAsync(id);
                 };
-
                 mainVm.RequestRefreshHistory += async (s, e) =>
                 {
                     if (_historyVm != null) await _historyVm.LoadBatchesAsync();
                 };
-
-                // ★ 新增: 概览刷新事件
                 mainVm.RequestRefreshOverview += async (s, e) =>
                 {
                     if (_overviewVm != null) await _overviewVm.LoadAsync();
                 };
-
-                // ── 事件订阅: 历史页 → MainViewModel ──
 
                 if (_historyVm != null)
                 {
@@ -172,30 +179,33 @@ namespace MaxChemical.Modules.DOE.Views
                     {
                         mainVm.CurrentBatchId = id;
                         mainVm.SelectedTabIndex = 2;
-                        _ = _modelAnalysisVm?.LoadBatchAsync(id);
+                        // ★ 直接跳到 OLS Tab 并加载该批次的分析
+                        _ = _modelAnalysisVm?.NavigateToOlsBatchAsync(id);
                     };
                 }
-
-                // ── 事件订阅: 概览页 → MainViewModel ──
 
                 if (_overviewVm != null)
                 {
                     _overviewVm.RequestResumeBatch += (s, id) => mainVm.NavigateToExecution(id);
                     _overviewVm.RequestGoToHistory += (s, e) => mainVm.SelectedTabIndex = 3;
-
-                    // ★ 新增: 项目操作事件
                     _overviewVm.RequestContinueProject += (s, projectId) =>
                     {
                         _ = mainVm.ContinueProjectAsync(projectId);
                     };
                     _overviewVm.RequestViewProject += (s, projectId) =>
                     {
-                        mainVm.SelectedTabIndex = 3;  // 跳转历史页
+                        mainVm.SelectedTabIndex = 3;
                     };
                 }
+                _overviewVm.RequestViewAnalysis += (s, projectId) =>
+                {
+                    _ = mainVm.NavigateToAnalysisByProjectAsync(projectId);
+                };
+                // ── 完成 ──
+                UpdateLoadingStep(4, "准备就绪");
+                await Task.Delay(200);
 
                 LoadingOverlay.Visibility = Visibility.Collapsed;
-
                 mainVm.SelectedTabIndex = 0;
                 await _overviewVm.LoadAsync();
             }
@@ -203,6 +213,27 @@ namespace MaxChemical.Modules.DOE.Views
             {
                 LoadingOverlay.Visibility = Visibility.Collapsed;
                 MessageBox.Show($"初始化失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+      
+        private void UpdateLoadingStep(int completedSteps, string? overrideText = null)
+        {
+            // 更新进度条宽度（总宽 220）
+            var targetWidth = 220.0 * completedSteps / 4.0;
+            LoadingProgressBar.Width = targetWidth;
+
+            // 更新状态文字
+            if (overrideText != null)
+            {
+                LoadingStatusText.Text = overrideText;
+            }
+            else if (completedSteps < LoadingMessages.Length)
+            {
+                LoadingStatusText.Text = LoadingMessages[completedSteps];
+            }
+            else
+            {
+                LoadingStatusText.Text = "准备就绪";
             }
         }
         private void ProjectMenuBtn_Click(object sender, RoutedEventArgs e)
@@ -278,5 +309,7 @@ namespace MaxChemical.Modules.DOE.Views
         {
             return new DoubleAnimation(to, AnimDuration) { EasingFunction = AnimEase };
         }
+
+      
     }
 }

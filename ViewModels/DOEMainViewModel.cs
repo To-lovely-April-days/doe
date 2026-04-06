@@ -335,7 +335,24 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 ProjectStatusText = "";
             }
         }
-
+        public async Task NavigateToAnalysisByProjectAsync(string projectId)
+        {
+            try
+            {
+                var batches = await _repository.GetBatchesByProjectAsync(projectId);
+                var latest = batches?.OrderByDescending(b => b.RoundNumber ?? 0).FirstOrDefault();
+                if (latest != null)
+                {
+                    CurrentBatchId = latest.BatchId;
+                    SelectedTabIndex = 2;
+                    RequestLoadAnalysis?.Invoke(this, latest.BatchId);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "跳转项目分析页失败: {ProjectId}", projectId);
+            }
+        }
         private static DOEProjectPhase RecommendationToPhase(NextStepRecommendation rec) => rec switch
         {
             NextStepRecommendation.ContinueScreening => DOEProjectPhase.Screening,

@@ -843,14 +843,15 @@ namespace MaxChemical.Modules.DOE.ViewModels
             try
             {
                 StatusMessage = "正在初始化 GPR 预测模型...";
-
+                // ★ 新增：传入项目 ID
+                _gprService.SetProjectId(_currentProjectId);
                 // Step 1: 初始化主响应模型（新建或恢复已有同签名模型）
                 await _gprService.InitializeModelAsync(flowId, factors);
 
                 //  新增 Step 1.5: 初始化多响应模型（为每个响应创建独立的 GPR）
                 try
                 {
-                    await _multiGprService.InitializeAsync(flowId, factors, responses);
+                    await _multiGprService.InitializeAsync(flowId, factors, responses, _currentProjectId);
                     _logger.LogInformation("多响应 GPR 初始化成功: {Count} 个响应", responses.Count);
                 }
                 catch (Exception ex)

@@ -76,7 +76,30 @@
             </Setter.Value>
         </Setter>
     </Style>
-
+    <Style x:Key="CloseButtonStyle" TargetType="Button">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Width" Value="15"/>
+        <Setter Property="Height" Value="15"/>
+        <Setter Property="Margin" Value="0,0,13,0"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border Background="{TemplateBinding Background}">
+                        <Image Source="pack://siteoforigin:,,,/Resources/Icon/closeWhite.png" 
+                  Width="15" Height="15" 
+                  Stretch="Uniform"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter Property="Background" Value="#CC0000"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
     <!-- ═══ Tab ═══ -->
     <Style x:Key="DOETabItem" TargetType="TabItem">
         <Setter Property="Padding" Value="20,13"/>

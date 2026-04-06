@@ -40,7 +40,8 @@ namespace MaxChemical.Modules.DOE
             containerRegistry.Register<DOEExecutionDashboardViewModel>();
             containerRegistry.Register<DOEModelAnalysisViewModel>();
             containerRegistry.Register<DOEHistoryViewModel>();
-
+            containerRegistry.Register<DOEProjectDetailViewModel>();
+            
             // View
             containerRegistry.Register<DOEMainView>();
             containerRegistry.Register<DOEOverviewView>();
@@ -48,6 +49,7 @@ namespace MaxChemical.Modules.DOE
             containerRegistry.Register<DOEExecutionDashboardView>();
             containerRegistry.Register<DOEModelAnalysisView>();
             containerRegistry.Register<DOEHistoryView>();
+            containerRegistry.Register<DOEProjectDetailDialog>();
         }
     }
 }

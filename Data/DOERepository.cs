@@ -390,9 +390,9 @@ namespace MaxChemical.Modules.DOE.Data
         public async Task SaveGPRModelStateAsync(GPRModelState state)
         {
             const string sql = @"
-        INSERT INTO doe_gpr_models (flow_id, factor_signature, model_name, model_state, training_data_json, hyperparams_json,
+        INSERT INTO doe_gpr_models (flow_id,project_id, factor_signature, model_name, model_state, training_data_json, hyperparams_json,
         data_count, r_squared, rmse, is_active, evolution_history_json, last_trained_time)
-        VALUES (@flowId, @sig, @name, @model, @data, @hyper, @count, @r2, @rmse, @active, @evo, @trained)
+        VALUES (@flowId,@projectId, @sig, @name, @model, @data, @hyper, @count, @r2, @rmse, @active, @evo, @trained)
         ON DUPLICATE KEY UPDATE 
         model_name=@name, model_state=@model, training_data_json=@data, hyperparams_json=@hyper,
         data_count=@count, r_squared=@r2, rmse=@rmse, is_active=@active, 
@@ -401,6 +401,7 @@ namespace MaxChemical.Modules.DOE.Data
             await conn.OpenAsync();
             using var cmd = new MySqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@flowId", state.FlowId);
+            cmd.Parameters.AddWithValue("@projectId", (object?)state.ProjectId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@sig", state.FactorSignature);
             cmd.Parameters.AddWithValue("@name", state.ModelName);
             cmd.Parameters.AddWithValue("@model", state.ModelStateBytes ?? (object)DBNull.Value);
@@ -757,6 +758,18 @@ namespace MaxChemical.Modules.DOE.Data
             return await reader.ReadAsync() ? MapGPRModelState(reader) : null;
         }
 
+        public async Task<List<GPRModelState>> GetGPRModelsByProjectAsync(string projectId)
+        {
+            const string sql = "SELECT * FROM doe_gpr_models WHERE project_id=@pid ORDER BY updated_time DESC";
+            using var conn = CreateConnection();
+            await conn.OpenAsync();
+            using var cmd = new MySqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@pid", projectId);
+            using var reader = await cmd.ExecuteReaderAsync();
+            var list = new List<GPRModelState>();
+            while (await reader.ReadAsync()) list.Add(MapGPRModelState(reader));
+            return list;
+        }
 
     }
 

@@ -23,6 +23,7 @@ namespace MaxChemical.Modules.DOE.Services
         private string _currentFlowId = "";
         private string _currentSignature = "";   //  新增
         private string _currentModelName = "";   //  新增
+        private string? _currentProjectId;
         public GPRModelService(IDOERepository repository, ILogService logger)
         {
             _repository = repository ?? throw new ArgumentNullException(nameof(repository));
@@ -31,7 +32,11 @@ namespace MaxChemical.Modules.DOE.Services
 
         public bool IsActive => _pythonModel != null && _isPythonInitialized &&
                                 (bool)GetPythonProperty("is_active", false);
-
+        /// <summary>设置当前项目 ID（项目模式下调用）</summary>
+        public void SetProjectId(string? projectId)
+        {
+            _currentProjectId = projectId;
+        }
         public int DataCount => _pythonModel != null && _isPythonInitialized
             ? (int)GetPythonProperty("data_count", 0) : 0;
 
@@ -347,6 +352,7 @@ namespace MaxChemical.Modules.DOE.Services
                 var state = new GPRModelState
                 {
                     FlowId = flowId,
+                    ProjectId = _currentProjectId,      // ★ 新增这一行
                     FactorSignature = _currentSignature,
                     ModelName = _currentModelName,
                     ModelStateBytes = modelBytes,
@@ -438,6 +444,7 @@ namespace MaxChemical.Modules.DOE.Services
                 var state = new GPRModelState
                 {
                     FlowId = flowId,
+                    ProjectId = _currentProjectId,      // ★ 新增这一行
                     FactorSignature = _currentSignature,
                     ModelName = _currentModelName,
                     ModelStateBytes = modelBytes,

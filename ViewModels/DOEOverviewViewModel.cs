@@ -1,13 +1,16 @@
-using System;
-using System.Collections.ObjectModel;
-using System.Linq;
-using System.Threading.Tasks;
 using MaxChemical.Infrastructure.DOE;
 using MaxChemical.Logging;
 using MaxChemical.Modules.DOE.Data;
 using MaxChemical.Modules.DOE.Models;
+using MaxChemical.Modules.DOE.Views;
 using Prism.Commands;
 using Prism.Mvvm;
+using System;
+using System.Collections.ObjectModel;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Media;
 
 namespace MaxChemical.Modules.DOE.ViewModels
 {
@@ -60,6 +63,10 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 id => { if (!string.IsNullOrEmpty(id)) RequestContinueProject?.Invoke(this, id); });
             ViewProjectCommand = new DelegateCommand<string>(
                 id => { if (!string.IsNullOrEmpty(id)) RequestViewProject?.Invoke(this, id); });
+            ViewProjectDetailCommand = new DelegateCommand<string>(async id => await ShowProjectDetailAsync(id));
+            ViewProjectAnalysisCommand = new DelegateCommand<string>(id => { if (!string.IsNullOrEmpty(id)) RequestViewAnalysis?.Invoke(this, id); });
+            ArchiveProjectCommand = new DelegateCommand<string>(async id => await ArchiveProjectAsync(id));
+            DeleteProjectCommand = new DelegateCommand<string>(async id => await DeleteProjectAsync(id));
         }
 
         // ══════════════ Properties ══════════════
@@ -97,7 +104,10 @@ namespace MaxChemical.Modules.DOE.ViewModels
         public DelegateCommand GoToHistoryCommand { get; }
         public DelegateCommand<string> ContinueProjectCommand { get; }
         public DelegateCommand<string> ViewProjectCommand { get; }
-
+        public DelegateCommand<string> ViewProjectDetailCommand { get; }
+        public DelegateCommand<string> ViewProjectAnalysisCommand { get; }
+        public DelegateCommand<string> ArchiveProjectCommand { get; }
+        public DelegateCommand<string> DeleteProjectCommand { get; }
         // ══════════════ Events ══════════════
 
         public event EventHandler<string>? RequestResumeBatch;
@@ -108,62 +118,55 @@ namespace MaxChemical.Modules.DOE.ViewModels
         public event EventHandler<string>? RequestViewProject;
         /// <summary>请求创建新项目</summary>
         public event EventHandler? RequestCreateProject;
-
+        // 事件：
+        public event EventHandler<string>? RequestViewAnalysis;
         // ══════════════ 加载 ══════════════
 
         public async Task LoadAsync()
         {
             try
             {
-                // 加载项目列表
                 var projects = await _repository.GetAllProjectSummariesAsync(20);
 
                 TotalProjectCount = projects.Count;
                 ActiveProjectCount = projects.Count(p => p.Status == DOEProjectStatus.Active);
                 TotalExperiments = projects.Sum(p => p.TotalExperiments);
 
-                var cards = projects.Select(p => new ProjectCardItem
+                var cards = new List<ProjectCardItem>();
+
+                foreach (var p in projects)
                 {
-                    ProjectId = p.ProjectId,
-                    ProjectName = p.ProjectName,
-                    FlowName = p.FlowName ?? "",
-                    CurrentPhase = p.CurrentPhase,
-                    PhaseText = p.PhaseText,
-                    Status = p.Status,
-                    TotalBatches = p.TotalBatches,
-                    TotalExperiments = p.TotalExperiments,
-                    BestResponseValue = p.BestResponseValue,
-                    CreatedTime = p.CreatedTime,
-                    UpdatedTime = p.UpdatedTime,
-                    // 状态颜色
-                    PhaseColor = p.CurrentPhase switch
+                    var card = new ProjectCardItem
                     {
-                        DOEProjectPhase.Screening => "#E67E22",
-                        DOEProjectPhase.PathSearch => "#3498DB",
-                        DOEProjectPhase.RSM => "#9B59B6",
-                        DOEProjectPhase.Augmenting => "#1ABC9C",
-                        DOEProjectPhase.Confirmation => "#27AE60",
-                        DOEProjectPhase.Completed => "#95A5A6",
-                        _ => "#7F8C8D"
-                    },
-                    StatusIcon = p.Status == DOEProjectStatus.Active ? "▶" : "■",
-                    BestValueText = p.BestResponseValue.HasValue ? $"{p.BestResponseValue:F2}" : "—",
-                    SummaryText = $"{p.TotalBatches} 轮 · {p.TotalExperiments} 组实验"
-                }).ToList();
+                        ProjectId = p.ProjectId,
+                        ProjectName = p.ProjectName,
+                        FlowName = p.FlowName ?? "",
+                        CurrentPhase = p.CurrentPhase,
+                        PhaseText = GetShortPhaseText(p.CurrentPhase),
+                        Status = p.Status,
+                        TotalBatches = p.TotalBatches,
+                        TotalExperiments = p.TotalExperiments,
+                        BestResponseValue = p.BestResponseValue,
+                        CreatedTime = p.CreatedTime,
+                        UpdatedTime = p.UpdatedTime,
+                        PhaseColor = GetPhaseColor(p.CurrentPhase),
+                        StatusIcon = p.Status == DOEProjectStatus.Active ? "▶" : "■",
+                        BestValueText = p.BestResponseValue.HasValue ? $"{p.BestResponseValue:F2}" : "—",
+                        SummaryText = $"{p.TotalBatches} 轮 · {p.TotalExperiments} 组实验",
+                        PhaseSegments = BuildPhaseSegments(p.CurrentPhase),
+                        PhaseProgressText = BuildPhaseProgressText(p.CurrentPhase),
+                    };
+
+                    // ★ 查询最新批次的因子和响应，构建标签和详细摘要
+                    await BuildCardDetails(card, p);
+
+                    cards.Add(card);
+                }
 
                 ProjectCards = new ObservableCollection<ProjectCardItem>(cards);
                 RaisePropertyChanged(nameof(HasProjects));
 
-                // 查找正在执行的批次（跨所有项目）
                 await FindResumableBatchAsync();
-
-                // GPR 状态
-                var flowId = _paramProvider.GetCurrentFlowId();
-                if (!string.IsNullOrEmpty(flowId))
-                {
-                    var state = await _repository.GetGPRModelStateAsync(flowId);
-                    GPRStatusSummary = state?.IsActive == true ? $"已激活 R²={state.RSquared:F2}" : "未初始化";
-                }
             }
             catch (Exception ex)
             {
@@ -171,6 +174,149 @@ namespace MaxChemical.Modules.DOE.ViewModels
             }
         }
 
+        private async Task BuildCardDetails(ProjectCardItem card, DOEProjectSummary p)
+        {
+            try
+            {
+                // 查询该项目最新批次
+                var batches = await _repository.GetBatchesByProjectAsync(p.ProjectId);
+                var latestBatch = batches?.OrderByDescending(b => b.RoundNumber ?? 0).FirstOrDefault();
+
+                if (latestBatch != null)
+                {
+                    // 设计方法文字
+                    var methodText = GetDesignMethodText(latestBatch.DesignMethod);
+
+                    // 详细摘要
+                    card.DetailSummaryText = $"第 {latestBatch.RoundNumber ?? card.TotalBatches} 轮 · " +
+                                             $"{methodText} · " +
+                                             $"{p.TotalExperiments} 组实验 · " +
+                                             $"{p.UpdatedTime:MM-dd HH:mm}";
+
+                    // 因子标签
+                    var factors = latestBatch.Factors;
+                    if (factors == null || factors.Count == 0)
+                    {
+                        factors = (await _repository.GetFactorsAsync(latestBatch.BatchId))?.ToList()
+                                  ?? new List<DOEFactor>();
+                    }
+
+                    var tags = new ObservableCollection<TagItem>();
+
+                    // 因子标签（灰底）
+                    foreach (var f in factors)
+                    {
+                        tags.Add(new TagItem
+                        {
+                            Text = f.FactorName,
+                            Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#5A5F6D")),
+                            Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#F2F4F7"))
+                        });
+                    }
+
+                    // 响应标签（蓝底）
+                    var responses = latestBatch.Responses;
+                    if (responses == null || responses.Count == 0)
+                    {
+                        responses = (await _repository.GetResponsesAsync(latestBatch.BatchId))?.ToList()
+                                    ?? new List<DOEResponse>();
+                    }
+
+                    foreach (var r in responses)
+                    {
+                        tags.Add(new TagItem
+                        {
+                            Text = r.ResponseName,
+                            Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#0078D4")),
+                            Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#EBF3FE"))
+                        });
+                    }
+
+                    card.TagItems = tags;
+                }
+                else
+                {
+                    card.DetailSummaryText = $"{p.TotalBatches} 轮 · {p.TotalExperiments} 组实验 · {p.UpdatedTime:MM-dd HH:mm}";
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "构建项目卡片详情失败: {ProjectId}", p.ProjectId);
+                card.DetailSummaryText = $"{p.TotalBatches} 轮 · {p.TotalExperiments} 组实验 · {p.UpdatedTime:MM-dd HH:mm}";
+            }
+        }
+
+        private static string GetShortPhaseText(DOEProjectPhase phase) => phase switch
+        {
+            DOEProjectPhase.Screening => "筛选",
+            DOEProjectPhase.PathSearch => "爬坡",
+            DOEProjectPhase.RSM => "RSM",
+            DOEProjectPhase.Augmenting => "补点",
+            DOEProjectPhase.Confirmation => "验证",
+            DOEProjectPhase.Completed => "完成",
+            _ => phase.ToString()
+        };
+
+        private static string GetPhaseColor(DOEProjectPhase phase) => phase switch
+        {
+            DOEProjectPhase.Screening => "#E67E22",
+            DOEProjectPhase.PathSearch => "#3498DB",
+            DOEProjectPhase.RSM => "#9B59B6",
+            DOEProjectPhase.Augmenting => "#1ABC9C",
+            DOEProjectPhase.Confirmation => "#27AE60",
+            DOEProjectPhase.Completed => "#95A5A6",
+            _ => "#7F8C8D"
+        };
+
+        private static string GetDesignMethodText(DOEDesignMethod method) => method switch
+        {
+            DOEDesignMethod.FullFactorial => "全因子设计",
+            DOEDesignMethod.FractionalFactorial => "部分因子设计",
+            DOEDesignMethod.Taguchi => "Taguchi 设计",
+            DOEDesignMethod.CCD => "CCD 设计",
+            DOEDesignMethod.BoxBehnken => "Box-Behnken 设计",
+            DOEDesignMethod.DOptimal => "D-Optimal 设计",
+            DOEDesignMethod.SteepestAscent => "最速上升",
+            DOEDesignMethod.AugmentedDesign => "增强设计",
+            DOEDesignMethod.ConfirmationRuns => "验证实验",
+            _ => method.ToString()
+        };
+
+        private static ObservableCollection<PhaseSegmentItem> BuildPhaseSegments(DOEProjectPhase currentPhase)
+        {
+            int currentIndex = currentPhase switch
+            {
+                DOEProjectPhase.Screening => 0,
+                DOEProjectPhase.PathSearch => 1,
+                DOEProjectPhase.RSM => 2,
+                DOEProjectPhase.Augmenting => 2,
+                DOEProjectPhase.Confirmation => 3,
+                DOEProjectPhase.Completed => 5,
+                _ => 0
+            };
+
+            var active = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#0078D4"));
+            var current = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#0078D4")) { Opacity = 0.45 };
+            var inactive = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E8EAED"));
+
+            var segments = new ObservableCollection<PhaseSegmentItem>();
+            for (int i = 0; i < 5; i++)
+            {
+                if (i < currentIndex)
+                    segments.Add(new PhaseSegmentItem { Color = active });
+                else if (i == currentIndex)
+                    segments.Add(new PhaseSegmentItem { Color = current });
+                else
+                    segments.Add(new PhaseSegmentItem { Color = inactive });
+            }
+            return segments;
+        }
+
+        private static string BuildPhaseProgressText(DOEProjectPhase currentPhase) => currentPhase switch
+        {
+            DOEProjectPhase.Completed => "已完成全部优化流程",
+            _ => "筛选 → 爬坡 → RSM → 验证 → 完成"
+        };
         private async Task FindResumableBatchAsync()
         {
             try
@@ -196,6 +342,56 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 _logger.LogError(ex, "查找可恢复批次失败");
                 HasResumableBatch = false;
             }
+        }
+        private async Task ShowProjectDetailAsync(string? projectId)
+        {
+            if (string.IsNullOrEmpty(projectId)) return;
+            try
+            {
+                var vm = new DOEProjectDetailViewModel(_repository);
+                await vm.LoadAsync(projectId);
+                var dialog = new DOEProjectDetailDialog
+                {
+                    DataContext = vm,
+                    Owner = System.Windows.Application.Current.Windows
+                        .OfType<Window>()
+                        .FirstOrDefault(w => w.IsActive)
+                        ?? System.Windows.Application.Current.MainWindow
+                };
+                dialog.ShowDialog();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "打开项目详情失败");
+            }
+        }
+
+        private async Task ArchiveProjectAsync(string? projectId)
+        {
+            if (string.IsNullOrEmpty(projectId)) return;
+            var result = System.Windows.MessageBox.Show("确定要归档此项目吗？归档后不会删除数据。",
+                "归档确认", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Question);
+            if (result != System.Windows.MessageBoxResult.Yes) return;
+            try
+            {
+                await _repository.UpdateProjectStatusAsync(projectId, DOEProjectStatus.Archived);
+                await LoadAsync();
+            }
+            catch (Exception ex) { _logger.LogError(ex, "归档项目失败"); }
+        }
+
+        private async Task DeleteProjectAsync(string? projectId)
+        {
+            if (string.IsNullOrEmpty(projectId)) return;
+            var result = System.Windows.MessageBox.Show("确定要删除此项目吗？\n批次数据将保留但不再关联到项目。",
+                "删除确认", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Warning);
+            if (result != System.Windows.MessageBoxResult.Yes) return;
+            try
+            {
+                await _repository.DeleteProjectWithChildrenAsync(projectId);
+                await LoadAsync();
+            }
+            catch (Exception ex) { _logger.LogError(ex, "删除项目失败"); }
         }
     }
 
@@ -224,5 +420,41 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
         /// <summary>是否可继续优化</summary>
         public bool CanContinue => Status == DOEProjectStatus.Active;
+        /// <summary>阶段进度条分段数据（5段：筛选/爬坡/RSM/验证/完成）</summary>
+        public ObservableCollection<PhaseSegmentItem> PhaseSegments { get; set; } = new();
+
+        /// <summary>阶段进度文字（如 "筛选 → 爬坡 → RSM → 验证 → 完成"）</summary>
+        public string PhaseProgressText { get; set; } = "";
+
+        /// <summary>系统推荐文字（有推荐时显示）</summary>
+        public string? RecommendationText { get; set; }
+
+        /// <summary>是否有系统推荐</summary>
+        public bool HasRecommendation => !string.IsNullOrEmpty(RecommendationText);
+        /// <summary>详细摘要文字（如 "第 4 轮 · CCD 设计 · 72 组实验 · 04-06 13:53"）</summary>
+        public string DetailSummaryText { get; set; } = "";
+
+        /// <summary>因子+响应标签列表</summary>
+        public ObservableCollection<TagItem> TagItems { get; set; } = new();
+
+
+
+    }
+    /// <summary>
+    /// 阶段进度条分段项
+    /// </summary>
+    public class PhaseSegmentItem
+    {
+        /// <summary>分段颜色画刷</summary>
+        public SolidColorBrush Color { get; set; } = new SolidColorBrush(Colors.LightGray);
+    }
+    /// <summary>
+    /// 因子/响应标签项（供概览页 ItemsControl 绑定）
+    /// </summary>
+    public class TagItem
+    {
+        public string Text { get; set; } = "";
+        public SolidColorBrush Foreground { get; set; } = new(Colors.Gray);
+        public SolidColorBrush Background { get; set; } = new(Colors.LightGray);
     }
 }

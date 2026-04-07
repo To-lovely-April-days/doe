@@ -66,7 +66,7 @@
 
         <!-- ═══ GPR Tab 内容 ═══ -->
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
-                      Visibility="{Binding IsGprTabSelected, Converter={StaticResource BoolToVis}}">
+                      Visibility="{Binding IsGprTabSelected, Converter={StaticResource BoolToVis}}"  Style="{StaticResource ThinScrollViewerStyle}">
             <StackPanel Margin="18">
 
                 <!-- 1. 模型选择 + 操作按钮 + 指标条 -->
@@ -405,7 +405,7 @@
 
         <!-- ═══ OLS Tab 内容 ═══ -->
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
-              Visibility="{Binding IsOlsTabSelected, Converter={StaticResource BoolToVis}}">
+              Visibility="{Binding IsOlsTabSelected, Converter={StaticResource BoolToVis}}"  Style="{StaticResource ThinScrollViewerStyle}">
             <StackPanel>
 
                 <!-- ══ 顶部工具栏 ══ -->

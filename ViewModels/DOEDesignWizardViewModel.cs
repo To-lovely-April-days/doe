@@ -59,6 +59,8 @@ namespace MaxChemical.Modules.DOE.ViewModels
         //  新增: D-Optimal 配置
         private int _dOptimalRunCount = -1;
         private string _dOptimalModelType = "quadratic";
+        private int _fullFactorialLevels = 2;
+        private int _fullFactorialCenterCount = 0;
         //  新增: 设计质量
         private DOEDesignQuality? _designQuality;
         // ── 参数矩阵 (Step3) ──
@@ -129,6 +131,13 @@ namespace MaxChemical.Modules.DOE.ViewModels
         //  新增: D-Optimal 属性
         public int DOptimalRunCount { get => _dOptimalRunCount; set => SetProperty(ref _dOptimalRunCount, value); }
         public string DOptimalModelType { get => _dOptimalModelType; set => SetProperty(ref _dOptimalModelType, value); }
+        private string _customAnalysisType = "linear";
+        /// <summary>自定义导入的分析类型（linear/interaction/quadratic）</summary>
+        public string CustomAnalysisType
+        {
+            get => _customAnalysisType;
+            set => SetProperty(ref _customAnalysisType, value);
+        }
         //  新增: 设计质量评估结果
         public DOEDesignQuality? DesignQuality
         {
@@ -198,7 +207,19 @@ namespace MaxChemical.Modules.DOE.ViewModels
         public bool IsStep4Visible => CurrentStep == 4;
         public bool IsStep5Visible => CurrentStep == 5;
         public bool IsStep6Visible => CurrentStep == 6;
+        /// <summary>Full Factorial 水平数（2 或 3）</summary>
+        public int FullFactorialLevels
+        {
+            get => _fullFactorialLevels;
+            set => SetProperty(ref _fullFactorialLevels, value);
+        }
 
+        /// <summary>Full Factorial 中心点数</summary>
+        public int FullFactorialCenterCount
+        {
+            get => _fullFactorialCenterCount;
+            set => SetProperty(ref _fullFactorialCenterCount, value);
+        }
         // ══════════════ Commands ══════════════
 
         public DelegateCommand NextStepCommand { get; private set; } = null!;
@@ -485,12 +506,13 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 //  修改: switch 新增 CCD / BoxBehnken / DOptimal / Custom 分支
                 _designMatrix = SelectedMethod switch
                 {
-                    DOEDesignMethod.FullFactorial => await _designService.GenerateFullFactorialAsync(factors),
+                    DOEDesignMethod.FullFactorial => await GenerateFullFactorialWithOptionsAsync(factors),
                     DOEDesignMethod.FractionalFactorial => await _designService.GenerateFractionalFactorialAsync(factors, FractionalResolution),
                     DOEDesignMethod.Taguchi => await _designService.GenerateTaguchiAsync(factors, TaguchiTableType),
                     DOEDesignMethod.CCD => await _designService.GenerateCCDAsync(factors, CcdAlphaType, CcdCenterCount),
                     DOEDesignMethod.BoxBehnken => await _designService.GenerateBoxBehnkenAsync(factors, BbdCenterCount),
                     DOEDesignMethod.DOptimal => await _designService.GenerateDOptimalAsync(factors, DOptimalRunCount, DOptimalModelType),
+                    DOEDesignMethod.PlackettBurman => await _designService.GeneratePlackettBurmanAsync(factors),
                     DOEDesignMethod.Custom => !string.IsNullOrEmpty(_customImportPath)
                         ? await _designService.ImportCustomMatrixAsync(_customImportPath, factors)
                         : null,
@@ -518,6 +540,49 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 RandomizeMatrixCommand.RaiseCanExecuteChanged();
                 AddCenterPointsCommand.RaiseCanExecuteChanged();
             }
+        }
+
+        /// <summary>
+        /// Full Factorial: 根据用户设置的水平数生成矩阵，并加中心点
+        /// </summary>
+        private async Task<DOEDesignMatrix?> GenerateFullFactorialWithOptionsAsync(List<DOEFactor> factors)
+        {
+            // 设置因子水平数
+            foreach (var f in factors)
+            {
+                if (!f.IsCategorical)
+                    f.LevelCount = FullFactorialLevels;
+            }
+            // 同步更新 ViewModel 中的 LevelCount
+            foreach (var fvm in Factors)
+            {
+                if (fvm.IsContinuous)
+                    fvm.LevelCount = FullFactorialLevels;
+            }
+
+            var matrix = await _designService.GenerateFullFactorialAsync(factors);
+
+            // 加中心点
+            if (matrix != null && FullFactorialCenterCount > 0)
+            {
+                var centerValues = new Dictionary<string, object>();
+                foreach (var f in factors)
+                {
+                    if (f.IsCategorical)
+                    {
+                        var levels = f.GetCategoryLevelList();
+                        centerValues[f.FactorName] = levels.Count > 0 ? levels[0] : "";
+                    }
+                    else
+                    {
+                        centerValues[f.FactorName] = f.CenterPoint;
+                    }
+                }
+                for (int i = 0; i < FullFactorialCenterCount; i++)
+                    matrix.AddCenterPoint(centerValues);
+            }
+
+            return matrix;
         }
         /// <summary>
         ///  新增: 评估设计质量
@@ -559,6 +624,10 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 _logger.LogError(ex, "设计质量评估失败");
                 DesignQuality = null;
+            }
+            finally
+            {
+                StatusMessage = "设计质量评估完成";
             }
         }
         private void RandomizeMatrix()
@@ -696,7 +765,11 @@ namespace MaxChemical.Modules.DOE.ViewModels
                             aEfficiency = DesignQuality.AEfficiency,
                             gEfficiency = DesignQuality.GEfficiency,
                             degreesOfFreedom = DesignQuality.DegreesOfFreedom
-                        } : null
+                        } : null,
+                        // ★ 新增: 持久化 OLS 模型类型（分析页读取用）
+                        olsModelType = GetOlsModelTypeForBatch(),
+                        fullFactorialLevels = FullFactorialLevels,
+                        fullFactorialCenterCount = FullFactorialCenterCount
                     }),
                     // ★ 新增: 项目关联（_currentProjectId 为 null 时行为与旧版一致）
                     ProjectId = _currentProjectId,
@@ -822,6 +895,37 @@ namespace MaxChemical.Modules.DOE.ViewModels
             {
                 IsLoading = false;
             }
+        }
+        /// <summary>
+        /// 根据设计方法自动推断 OLS 模型类型
+        /// 持久化到 DesignConfigJson.olsModelType，分析时直接读取
+        /// </summary>
+        private string GetOlsModelTypeForBatch()
+        {
+            return SelectedMethod switch
+            {
+                // 筛选类 → 一阶主效应
+                DOEDesignMethod.PlackettBurman => "linear",
+                DOEDesignMethod.FractionalFactorial => FractionalResolution >= 4 ? "interaction" : "linear",
+
+                // 因子类 → 按因子数
+                DOEDesignMethod.FullFactorial => FullFactorialLevels == 2
+                      ? (Factors.Count <= 4 ? "interaction" : "linear")
+                      : "quadratic",  // 3水平可拟合二次项
+
+                // 响应曲面类 → 二阶
+                DOEDesignMethod.CCD => "quadratic",
+                DOEDesignMethod.BoxBehnken => "quadratic",
+
+                // D-Optimal → 用户选择
+                DOEDesignMethod.DOptimal => DOptimalModelType,
+
+                // 自定义 → 用户在 Step2 选的分析类型
+                DOEDesignMethod.Custom => CustomAnalysisType,
+
+                // 兜底
+                _ => "quadratic"
+            };
         }
 
         /// <summary>

@@ -222,7 +222,8 @@ class DOEDesigner:
         
         # 中心点数自动决定
         if center_count < 0:
-            center_count = min(max(3, k + 1), 6)
+            _minitab_center_defaults = {2: 5, 3: 6, 4: 7, 5: 10}
+            center_count = _minitab_center_defaults.get(k, 6)
         
         # ── Part 1: 角点 (2^k 全因子) ──
         # 生成 {-1, +1}^k 的所有组合
@@ -352,6 +353,88 @@ class DOEDesigner:
         # ★ 新增: 与类别因子做笛卡尔积
         matrix = self._cross_with_categorical(matrix, categorical)
         
+        return json.dumps(matrix, ensure_ascii=False)
+
+    def plackett_burman(self, factors_json: str) -> str:
+        """
+        Plackett-Burman 设计 — 经济高效的因子筛选
+
+        特点:
+          1. 实验次数为 4 的倍数 (12, 20, 24, ...)
+          2. 最多可筛选 N-1 个因子
+          3. 分辨度 III（主效应与二因子交互混杂）
+          4. 比 Fractional Factorial 更灵活（不要求因子数为 2 的幂）
+
+        例: 7 个因子 → 12 组（FF 需要 8 或 16 组）
+            11 个因子 → 12 组
+            15 个因子 → 20 组
+        """
+        factors = json.loads(factors_json)
+        continuous, categorical = self._separate_factors(factors)
+        k = len(continuous)
+
+        if k < 2:
+            raise ValueError("Plackett-Burman 至少需要 2 个连续因子")
+
+        # 确定实验次数 N（4 的倍数，>= k+1）
+        N = k + 1
+        if N % 4 != 0:
+            N = ((N // 4) + 1) * 4
+        N = max(N, 12)
+
+        # 方法1: 用 pyDOE2（优先，最可靠）
+        design = None
+        try:
+            from pyDOE2 import pbdesign
+            design = pbdesign(k)
+        except ImportError:
+            pass
+
+        # 方法2: 用 scipy Hadamard 矩阵
+        if design is None:
+            try:
+                from scipy.linalg import hadamard
+                H = hadamard(N)
+                # Hadamard 矩阵第一行全 1，跳过；取前 k 列（跳过第一列全 1）
+                design = H[1:, 1:k + 1].astype(float)
+            except Exception:
+                pass
+
+        # 方法3: 手动构造 12-run PB 设计（Paley 构造）
+        if design is None:
+            if k <= 11:
+                # 经典 12-run PB 的第一行生成向量
+                gen = [1, 1, -1, 1, 1, 1, -1, -1, -1, 1, -1]
+                rows = []
+                current = list(gen)
+                for _ in range(11):
+                    rows.append(current[:k])
+                    # 循环右移
+                    current = [current[-1]] + current[:-1]
+                # 加一行全 -1
+                rows.append([-1] * k)
+                design = np.array(rows, dtype=float)
+            else:
+                raise ValueError(
+                    f"因子数 {k} 过多，请安装 pyDOE2: pip install pyDOE2"
+                )
+
+        # 解码为实际因子值
+        matrix = []
+        for row in design:
+            decoded = {}
+            for i, f in enumerate(continuous):
+                if i < len(row):
+                    center = (f["lower"] + f["upper"]) / 2.0
+                    half_range = (f["upper"] - f["lower"]) / 2.0
+                    decoded[f["name"]] = round(
+                        center + float(row[i]) * half_range, 6
+                    )
+            matrix.append(decoded)
+
+        # 与类别因子做笛卡尔积
+        matrix = self._cross_with_categorical(matrix, categorical)
+
         return json.dumps(matrix, ensure_ascii=False)
 
     def d_optimal(self, factors_json: str, num_runs: int = -1, model_type: str = "quadratic") -> str:
@@ -1720,6 +1803,7 @@ class DOEAnalyzer:
             return json.dumps({"loaded": False, "error": "无数据"}, ensure_ascii=False)
         
         self._df = pd.DataFrame(factors_list)
+        self._df_full_backup = None  # ★ v15: 清除旧备份，防止恢复操作覆盖新数据
         self._response_name = response_name
         self._df[response_name] = responses_list[:len(self._df)]
         self._factor_names = [c for c in self._df.columns if c != response_name]
@@ -1727,8 +1811,37 @@ class DOEAnalyzer:
         # ★ 新增: 分类连续因子和类别因子
         self._categorical_factors = []
         self._continuous_factors = []
+        self._factor_bounds = {}  # ★ v15: 用户设定的因子设计范围（用于编码对齐 Minitab）
+        self._coding_alpha = 1.0  # ★ v16: CCD 编码缩放因子（Minitab 用 half_range*α 编码）
+        
+        # ★ v16: 解析设计方法元数据（__design_meta__）
+        design_meta = factor_types.pop("__design_meta__", None)
+        if isinstance(design_meta, dict):
+            design_method = str(design_meta.get("design_method", "")).lower()
+            if design_method == "ccd":
+                ccd_alpha_type = str(design_meta.get("ccd_alpha_type", "rotatable")).lower()
+                k = int(design_meta.get("k_continuous", len([n for n in self._factor_names if factor_types.get(n) != "categorical"])))
+                if k >= 2:
+                    if ccd_alpha_type in ("face_centered", "face"):
+                        self._coding_alpha = 1.0  # face-centered α=1，不需要缩放
+                    else:
+                        # rotatable: α = (2^k)^0.25
+                        self._coding_alpha = float((2 ** k) ** 0.25)
+        
         for name in self._factor_names:
-            ftype = factor_types.get(name, "continuous").lower()
+            ftype_raw = factor_types.get(name, "continuous")
+            # ★ v15: 支持扩展格式 {"type":"continuous","lower":80,"upper":160}
+            if isinstance(ftype_raw, dict):
+                ftype = ftype_raw.get("type", "continuous").lower()
+                if "lower" in ftype_raw and "upper" in ftype_raw:
+                    lo = float(ftype_raw["lower"])
+                    hi = float(ftype_raw["upper"])
+                    # ★ v16: CCD 时 half_range 乘以 α（对齐 Minitab 编码方式）
+                    self._factor_bounds[name] = (lo, hi, self._coding_alpha)
+            elif isinstance(ftype_raw, str):
+                ftype = ftype_raw.lower()
+            else:
+                ftype = "continuous"
             # 自动检测: 如果列包含非数值，视为类别因子
             if ftype == "categorical":
                 self._categorical_factors.append(name)
@@ -1783,10 +1896,19 @@ class DOEAnalyzer:
                     self._coding_info[orig_name] = {"type": "categorical"}
                 else:
                     col = self._df[orig_name].astype(float)
-                    col_min = col.min()
-                    col_max = col.max()
-                    center = (col_min + col_max) / 2.0
-                    half_range = (col_max - col_min) / 2.0
+                    if orig_name in self._factor_bounds:
+                        # ★ v16: 优先用设计范围，CCD 时乘以 α（对齐 Minitab）
+                        bounds = self._factor_bounds[orig_name]
+                        lo, hi = bounds[0], bounds[1]
+                        alpha_scale = bounds[2] if len(bounds) > 2 else 1.0
+                        center = (lo + hi) / 2.0
+                        half_range = (hi - lo) / 2.0 * alpha_scale
+                    else:
+                        # 回退: 用数据范围（直接导入 Excel 时没有因子范围信息）
+                        col_min = col.min()
+                        col_max = col.max()
+                        center = (col_min + col_max) / 2.0
+                        half_range = (col_max - col_min) / 2.0
                     if half_range < 1e-12:
                         half_range = 1.0
                     self._coding_info[orig_name] = {"type": "continuous", "center": center, "half_range": half_range}
@@ -1908,7 +2030,8 @@ class DOEAnalyzer:
 
             fitted = model.fittedvalues
             p_count = len(model.params)
-            ms_res = float(model.mse_resid)
+            # ★ v15: RMSE 使用 Sum coding 模型（与系数表/ANOVA 一致，对标 Minitab）
+            ms_res = float(model_sum_coeff.mse_resid) if model_sum_coeff is not None else float(model.mse_resid)
             adeq_prec = 0.0
             # ★ FIX #2: Adequate Precision 对标 Design-Expert 标准公式
             # AP = (max(ŷ) - min(ŷ)) / sqrt(MSE × p/n)
@@ -1923,15 +2046,17 @@ class DOEAnalyzer:
             if dropped_terms:
                 inestimable_warning = f"以下项因数据不足或共线性被自动剔除: {', '.join(dropped_terms)}"
 
+            # ★ v15: model_summary 使用 Sum coding 模型（与系数表/ANOVA 一致，对标 Minitab）
+            _summary_model = model_sum_coeff if model_sum_coeff is not None else model
             model_summary = {
-                "r_squared": round(float(model.rsquared), 6),
-                "r_squared_adj": round(float(model.rsquared_adj), 6),
+                "r_squared": round(float(_summary_model.rsquared), 6),
+                "r_squared_adj": round(float(_summary_model.rsquared_adj), 6),
                 "r_squared_pred": round(float(r2_pred), 6),
                 "rmse": round(float(np.sqrt(ms_res)), 6),
                 "adeq_precision": round(adeq_prec, 4),
                 "press": round(press, 4),
                 "lack_of_fit_p": round(lof_p, 6) if lof_p is not None else None,
-                "model_p": round(float(model.f_pvalue), 6) if not np.isnan(model.f_pvalue) else None,
+                "model_p": round(float(_summary_model.f_pvalue), 6) if not np.isnan(_summary_model.f_pvalue) else None,
                 "equation": equation,
                 "equations": equations
             }
@@ -2270,10 +2395,15 @@ class DOEAnalyzer:
             # ★ 按 LogWorth 降序排列 (= 按 p 值升序, 跟 JMP/Minitab 排序一致)
             effects.sort(key=lambda x: x["abs_t"], reverse=True)
             
-            # 参考线: LogWorth at α → -log10(α)
+            # 参考线: LogWorth 动态阈值（对齐 JMP/Minitab）
+            # 公式: -log10(2*(1-Φ(t(1-α/2, df_error))))
+            # 先用 t 分布算临界值，再用正态分布转成 LogWorth
             m = len(effects)
             df_error = int(model_sum.df_resid)
-            log_worth_crit = float(-np.log10(alpha))
+            from scipy import stats as _sp_stats
+            t_crit = float(_sp_stats.t.ppf(1 - alpha / 2, df_error))
+            p_norm_at_tcrit = 2 * (1 - _sp_stats.norm.cdf(t_crit))
+            log_worth_crit = float(-np.log10(p_norm_at_tcrit))
             if m > 0 and df_error > 0:
                 for eff in effects:
                     eff["bonferroni_significant"] = eff["p_value"] < alpha / m
@@ -4215,10 +4345,19 @@ class DOEAnalyzer:
                     self._coding_info[orig_name] = {"type": "categorical"}
                 else:
                     col = self._df[orig_name].astype(float)
-                    col_min = col.min()
-                    col_max = col.max()
-                    center = (col_min + col_max) / 2.0
-                    half_range = (col_max - col_min) / 2.0
+                    # ★ v16: 优先用设计范围，CCD 时乘以 α（对齐 Minitab）
+                    if orig_name in self._factor_bounds:
+                        bounds = self._factor_bounds[orig_name]
+                        lo, hi = bounds[0], bounds[1]
+                        alpha_scale = bounds[2] if len(bounds) > 2 else 1.0
+                        center = (lo + hi) / 2.0
+                        half_range = (hi - lo) / 2.0 * alpha_scale
+                    else:
+                        # 回退: 用数据范围（直接导入 Excel 时没有因子范围信息）
+                        col_min = col.min()
+                        col_max = col.max()
+                        center = (col_min + col_max) / 2.0
+                        half_range = (col_max - col_min) / 2.0
                     if half_range < 1e-12:
                         half_range = 1.0
                     self._coding_info[orig_name] = {"type": "continuous", "center": center, "half_range": half_range}
@@ -4626,10 +4765,14 @@ class DOEAnalyzer:
             # ── 组装最终 ANOVA 表 ──
             result = []
             
-            # 模型汇总行（用原始值模型）
+            # ★ v15 修正: 模型/误差汇总行用 Sum coding ANOVA 模型的 ESS/SSR
+            # （之前用各因子 Type III SS 之和会导致误差 SS 为负，因为 Type III 各项不正交分解）
             ss_model = float(model_anova.ess)
             df_model = int(model_anova.df_model)
             ms_model = ss_model / max(df_model, 1)
+            ss_res_full = float(model_anova.ssr)
+            df_res_full = int(model_anova.df_resid)
+            ms_res = ss_res_full / max(df_res_full, 1)
             f_model = ms_model / ms_res if ms_res > 1e-12 else None
             p_model = float(model_anova.f_pvalue) if not np.isnan(model_anova.f_pvalue) else None
             result.append({

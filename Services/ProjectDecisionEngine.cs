@@ -79,7 +79,18 @@ namespace MaxChemical.Modules.DOE.Services
                     _logger.LogInformation("轮次分析: 自动触发 OLS 拟合, Batch={BatchId}, Response={Resp}",
                         batchId, primaryResponse);
 
-                    var olsResult = await _analysisService.FitOlsAsync(batchId, primaryResponse, "quadratic");
+                    var olsModelType = "quadratic";
+                    if (!string.IsNullOrEmpty(batch.DesignConfigJson))
+                    {
+                        try
+                        {
+                            var config = JsonConvert.DeserializeObject<Dictionary<string, object>>(batch.DesignConfigJson);
+                            if (config != null && config.TryGetValue("olsModelType", out var mt) && mt != null)
+                                olsModelType = mt.ToString()!;
+                        }
+                        catch { }
+                    }
+                    var olsResult = await _analysisService.FitOlsAsync(batchId, primaryResponse, olsModelType);
 
                     if (olsResult?.ModelSummary != null)
                     {
@@ -177,12 +188,13 @@ namespace MaxChemical.Modules.DOE.Services
             return recommendation switch
             {
                 NextStepRecommendation.ContinueScreening =>
-                    activeFactorCount > 7
-                        ? DOEDesignMethod.FractionalFactorial
-                        : DOEDesignMethod.Taguchi,
+    activeFactorCount > 7
+        ? DOEDesignMethod.FractionalFactorial
+        : DOEDesignMethod.PlackettBurman,   // ★ v14: Taguchi → PlackettBurman
 
                 NextStepRecommendation.SteepestAscent =>
                     DOEDesignMethod.SteepestAscent,
+
 
                 NextStepRecommendation.StartRSM =>
                     activeFactorCount >= 3

@@ -398,6 +398,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
         // ── OLS 直接导入 (不依赖批次) ──
         private bool _isDirectImportMode;
+        private string _currentOlsModelType = "quadratic";
         private string _directImportFilePath = "";
         private List<string> _directImportFactorNames = new();
         private List<string> _directImportResponseNames = new();
@@ -1156,6 +1157,20 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 _selectedResponseName = ResponseNames.FirstOrDefault() ?? "";
                 RaisePropertyChanged(nameof(SelectedResponseName));
             }
+
+            // ★ 新增：从 DesignConfigJson 解析 olsModelType
+            _currentOlsModelType = "quadratic"; // 默认
+            if (!string.IsNullOrEmpty(batch?.DesignConfigJson))
+            {
+                try
+                {
+                    var config = JsonConvert.DeserializeObject<Dictionary<string, object>>(batch.DesignConfigJson);
+                    if (config != null && config.TryGetValue("olsModelType", out var mt) && mt != null)
+                        _currentOlsModelType = mt.ToString()!;
+                }
+                catch { /* JSON 解析失败用默认值 */ }
+            }
+
             await RefreshOlsAnalysisAsync();
         }
 
@@ -1179,7 +1194,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
                 // Step 0: Fit OLS — 推到线程池
                 OlsResult = await Task.Run(() =>
-                    _analysisService.FitOlsAsync(SelectedOlsBatch.BatchId, _selectedResponseName, "quadratic"));
+                        _analysisService.FitOlsAsync(SelectedOlsBatch.BatchId, _selectedResponseName, _currentOlsModelType));
 
                 if (OlsResult?.ModelSummary != null)
                 {
@@ -3099,6 +3114,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 _directImportResponsesData = importResult.ResponsesData;
 
                 IsDirectImportMode = true;
+                _currentOlsModelType = "quadratic";
                 SelectedOlsBatch = null;
 
                 ResponseNames = importResult.ResponseNames;
@@ -3270,12 +3286,9 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
                 // Step 0: Fit OLS — 推到线程池
                 OlsResult = await Task.Run(() =>
-                    _analysisService.FitOlsDirectAsync(
-                        _directImportFactorsData,
-                        responsesData,
-                        _selectedResponseName,
-                        _directImportFactorTypes,
-                        "quadratic"));
+                                    _analysisService.FitOlsDirectAsync(
+                                     _directImportFactorsData, responsesData,
+                                    _selectedResponseName, _directImportFactorTypes, _currentOlsModelType));
 
                 if (OlsResult?.ModelSummary == null)
                 {
@@ -3937,7 +3950,18 @@ namespace MaxChemical.Modules.DOE.ViewModels
                         // 加到列表头部
                         OlsBatchItems.Insert(0, item);
                         SelectedOlsBatch = item;
-
+                        // ★ 新增：从 DesignConfigJson 解析 olsModelType
+                        _currentOlsModelType = "quadratic";
+                        if (!string.IsNullOrEmpty(batch.DesignConfigJson))
+                        {
+                            try
+                            {
+                                var config = JsonConvert.DeserializeObject<Dictionary<string, object>>(batch.DesignConfigJson);
+                                if (config != null && config.TryGetValue("olsModelType", out var mt) && mt != null)
+                                    _currentOlsModelType = mt.ToString()!;
+                            }
+                            catch { }
+                        }
                         // 执行 OLS 分析
                         await RefreshOlsAnalysisAsync();
                     }

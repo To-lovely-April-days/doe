@@ -217,7 +217,20 @@ namespace MaxChemical.Modules.DOE.Services
                 return Task.FromResult(result);
             }
         }
+        public Task<DOEDesignMatrix> GeneratePlackettBurmanAsync(List<DOEFactor> factors)
+        {
+            EnsurePythonReady();
+            var factorsJson = BuildFactorsJsonWithBounds(factors);
+            _logger.LogInformation("生成 Plackett-Burman 设计: {FactorCount} 个因子", factors.Count);
 
+            using (Py.GIL())
+            {
+                string matrixJson = _pythonDesigner!.plackett_burman(factorsJson).ToString();
+                var result = ParseDesignMatrix(matrixJson, factors);
+                _logger.LogInformation("PB 设计完成: {RunCount} 组实验", result.RunCount);
+                return Task.FromResult(result);
+            }
+        }
         // ═══════════════════════════════════════════════════════
         //  新增: 设计质量评估
         // ═══════════════════════════════════════════════════════

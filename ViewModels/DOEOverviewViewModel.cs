@@ -279,6 +279,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
             DOEDesignMethod.SteepestAscent => "最速上升",
             DOEDesignMethod.AugmentedDesign => "增强设计",
             DOEDesignMethod.ConfirmationRuns => "验证实验",
+            DOEDesignMethod.PlackettBurman => "Plackett-Burman",
             _ => method.ToString()
         };
 

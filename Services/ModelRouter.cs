@@ -28,39 +28,36 @@ namespace MaxChemical.Modules.DOE.Services
         /// </summary>
         public AnalysisStrategy SelectStrategy(DOEDesignMethod method, int factorCount, int dataCount)
         {
-            // 计算二阶模型参数数: p = 1 + 2k + C(k,2)
-            int p_quadratic = 1 + 2 * factorCount + factorCount * (factorCount - 1) / 2;
+            // 所有设计方法都走 OLS，只是模型类型不同（由 olsModelType 控制）
+            // 
+            // 路由规则 v2 (对齐 Minitab):
+            // ┌─────────────────────┬──────────────┬──────────────────┐
+            // │ 设计方法            │ 分析策略     │ OLS 模型类型     │
+            // ├─────────────────────┼──────────────┼──────────────────┤
+            // │ PlackettBurman      │ OLS          │ linear           │
+            // │ FractionalFactorial │ OLS          │ linear/interact  │
+            // │ FullFactorial       │ OLS          │ interact/linear  │
+            // │ CCD / BoxBehnken    │ OLS          │ quadratic        │
+            // │ DOptimal            │ OLS          │ 用户选择         │
+            // │ Custom              │ OLS          │ 用户选择         │
+            // └─────────────────────┴──────────────┴──────────────────┘
 
-            // 数据不足判断: 至少需要 p+2 个数据点（p个参数 + 2个自由度做误差估计）
-            if (dataCount < p_quadratic + 2 && dataCount < factorCount + 2)
+            // 根据模型类型计算所需参数数
+            // linear:      p = 1 + k
+            // interaction: p = 1 + k + C(k,2)
+            // quadratic:   p = 1 + 2k + C(k,2)
+            // 这里用最保守的 quadratic 判断数据是否充足
+            int p_quadratic = 1 + 2 * factorCount + factorCount * (factorCount - 1) / 2;
+            int p_linear = 1 + factorCount;
+
+            // 数据不足：连一阶主效应模型都拟合不了
+            if (dataCount < p_linear + 1)
             {
                 return AnalysisStrategy.Insufficient;
             }
 
-            // RSM 设计 → OLS
-            if (method == DOEDesignMethod.CCD ||
-                method == DOEDesignMethod.BoxBehnken ||
-                method == DOEDesignMethod.DOptimal)
-            {
-                // 数据量够拟合二阶模型才走 OLS，否则降级到 GPR
-                if (dataCount >= p_quadratic + 2)
-                    return AnalysisStrategy.OLS;
-                else
-                    return AnalysisStrategy.GPR;
-            }
-
-            // 全因子设计: 因子 ≤6 且数据量够 → OLS
-            if (method == DOEDesignMethod.FullFactorial)
-            {
-                if (factorCount <= 6 && dataCount >= p_quadratic + 2)
-                    return AnalysisStrategy.OLS;
-                else
-                    return AnalysisStrategy.GPR;
-            }
-
-            // 筛选类设计 → GPR（部分因子、Taguchi 数据结构不适合二阶 OLS）
-            // Custom → GPR（不确定设计结构）
-            return AnalysisStrategy.GPR;
+            // 全部走 OLS
+            return AnalysisStrategy.OLS;
         }
 
         /// <summary>
@@ -68,28 +65,37 @@ namespace MaxChemical.Modules.DOE.Services
         /// </summary>
         public string GetStrategyReason(AnalysisStrategy strategy, DOEDesignMethod method, int factorCount, int dataCount)
         {
+            int p_linear = 1 + factorCount;
+            int p_interaction = 1 + factorCount + factorCount * (factorCount - 1) / 2;
             int p_quadratic = 1 + 2 * factorCount + factorCount * (factorCount - 1) / 2;
 
             return strategy switch
             {
                 AnalysisStrategy.OLS => method switch
                 {
-                    DOEDesignMethod.CCD => $"CCD 设计适配二阶多项式模型，{dataCount} 组数据可拟合 {p_quadratic} 参数的 OLS 回归，提供 ANOVA 表和回归方程。",
-                    DOEDesignMethod.BoxBehnken => $"Box-Behnken 设计适配二阶多项式模型，提供 ANOVA 表和回归方程。",
-                    DOEDesignMethod.DOptimal => $"D-最优设计针对 OLS 回归优化，{dataCount} 组数据可拟合完整模型。",
-                    DOEDesignMethod.FullFactorial => $"全因子设计 ({factorCount}因子) 数据完整，使用 OLS 回归给出 ANOVA 表。",
+                    DOEDesignMethod.PlackettBurman =>
+                        $"Plackett-Burman 筛选设计，使用一阶主效应 OLS 回归，识别显著因子。",
+                    DOEDesignMethod.FractionalFactorial =>
+                        $"部分因子设计，使用 OLS 回归分析主效应" +
+                        (dataCount >= p_interaction + 2 ? "和交互效应。" : "。"),
+                    DOEDesignMethod.FullFactorial =>
+                        $"全因子设计 ({factorCount}因子)，使用 OLS 回归给出完整 ANOVA 表。",
+                    DOEDesignMethod.CCD =>
+                        $"CCD 设计适配二阶多项式模型，{dataCount} 组数据拟合 {p_quadratic} 参数 OLS 回归。",
+                    DOEDesignMethod.BoxBehnken =>
+                        $"Box-Behnken 设计适配二阶多项式模型，提供 ANOVA 表和回归方程。",
+                    DOEDesignMethod.DOptimal =>
+                        $"D-最优设计，{dataCount} 组数据拟合 OLS 回归模型。",
+                    DOEDesignMethod.Custom =>
+                        $"自定义设计，按用户选择的分析类型进行 OLS 回归。",
                     _ => "使用 OLS 回归分析。"
                 },
-                AnalysisStrategy.GPR => method switch
-                {
-                    DOEDesignMethod.FractionalFactorial => $"部分因子设计为筛选型，使用 GPR 代理模型进行敏感性分析和预测。",
-                    DOEDesignMethod.Taguchi => $"正交设计使用 GPR 代理模型，提供参数敏感性排名和最优搜索。",
-                    DOEDesignMethod.FullFactorial => $"全因子设计因子数较多 ({factorCount}个)，使用 GPR 模型避免参数爆炸。",
-                    _ => $"使用 GPR 代理模型进行分析，提供敏感性排名、预测和贝叶斯优化。"
-                },
-                AnalysisStrategy.Insufficient => $"当前 {dataCount} 组数据不足以拟合 {factorCount} 因子的模型（至少需要 {Math.Min(p_quadratic + 2, factorCount + 2)} 组）。请继续执行更多实验。",
+                AnalysisStrategy.Insufficient =>
+                    $"当前 {dataCount} 组数据不足以拟合 {factorCount} 因子的模型" +
+                    $"（至少需要 {p_linear + 1} 组）。请继续执行更多实验。",
                 _ => ""
             };
         }
+
     }
 }

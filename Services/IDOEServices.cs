@@ -22,6 +22,7 @@ namespace MaxChemical.Modules.DOE.Services
         Task<DOEDesignMatrix> GenerateBoxBehnkenAsync(List<DOEFactor> factors, int centerCount = -1);
         Task<DOEDesignMatrix> GenerateDOptimalAsync(List<DOEFactor> factors, int numRuns = -1, string modelType = "quadratic");
         Task<DOEDesignQuality> GetDesignQualityAsync(List<DOEFactor> factors, DOEDesignMatrix matrix, string modelType = "quadratic");
+        Task<DOEDesignMatrix> GeneratePlackettBurmanAsync(List<DOEFactor> factors);
     }
 
     public class DataValidationResult
@@ -107,6 +108,7 @@ namespace MaxChemical.Modules.DOE.Services
                         string source = "measured", string batchName = "", string timestamp = "");
         /// <summary>设置当前关联的项目 ID</summary>
         void SetProjectId(string? projectId);
+
     }
 
     public class GPRTrainResult

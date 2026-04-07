@@ -292,7 +292,8 @@ namespace MaxChemical.Modules.DOE.ViewModels
                         PrefilledFactors = factors,
                         PrefilledResponses = previousResponses
                     });
-
+                    // ★ 新增：设置项目名称供顶部栏显示
+                    wizardVm.ProjectName = _currentProject?.ProjectName ?? "";
                     wizardVm.BatchSaved += (s, id) => savedBatchId = id;
                 }
 

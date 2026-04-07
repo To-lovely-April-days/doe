@@ -12,7 +12,7 @@ namespace MaxChemical.Modules.DOE.Services
 {
     /// <summary>
     /// DOE 数据分析服务
-    /// ★ v13: 所有 OLS 解析统一使用 ParseOLSResult，支持 uncoded 系数/方程
+    /// ★ v14: 所有 OLS 方法不再写死 quadratic，改为 _lastModelType 动态路由
     /// </summary>
     public class DOEAnalysisService : IDOEAnalysisService
     {
@@ -24,6 +24,10 @@ namespace MaxChemical.Modules.DOE.Services
         private bool _isPythonInitialized;
         private string _loadedBatchId = "";
         private string _loadedResponseName = "";
+
+        // ★ v14 新增：记住最近一次 FitOls 使用的模型类型
+        // 后续 Direct 方法（曲面/残差/Pareto 等）复用此值，不再写死 "quadratic"
+        private string _lastModelType = "quadratic";
 
         public DOEAnalysisService(IDOERepository repository, IGPRModelService gprService, ILogService logger)
         {
@@ -86,12 +90,50 @@ namespace MaxChemical.Modules.DOE.Services
             var factorsJson = JsonConvert.SerializeObject(factorsData);
             var responsesJson = JsonConvert.SerializeObject(responsesData);
 
-            var factorTypesDict = new Dictionary<string, string>();
+            // ★ v15: 传因子设计范围给 Python，用于编码对齐 Minitab
+            var factorTypesDict = new Dictionary<string, object>();
             if (batch.Factors != null)
             {
                 foreach (var f in batch.Factors)
-                    factorTypesDict[f.FactorName] = f.IsCategorical ? "categorical" : "continuous";
+                {
+                    if (f.IsCategorical)
+                    {
+                        factorTypesDict[f.FactorName] = "categorical";
+                    }
+                    else
+                    {
+                        factorTypesDict[f.FactorName] = new
+                        {
+                            type = "continuous",
+                            lower = f.LowerBound,
+                            upper = f.UpperBound
+                        };
+                    }
+                }
             }
+
+            // ★ v16: 传设计方法信息，CCD 时 Python 用 half_range*α 编码（对齐 Minitab）
+            var designMeta = new Dictionary<string, object>
+            {
+                ["design_method"] = batch.DesignMethod.ToString()
+            };
+            if (batch.DesignMethod == DOEDesignMethod.CCD && !string.IsNullOrEmpty(batch.DesignConfigJson))
+            {
+                try
+                {
+                    var config = JsonConvert.DeserializeObject<Dictionary<string, object>>(batch.DesignConfigJson);
+                    if (config != null)
+                    {
+                        if (config.TryGetValue("ccdAlphaType", out var alphaType))
+                            designMeta["ccd_alpha_type"] = alphaType?.ToString() ?? "rotatable";
+                    }
+                }
+                catch { }
+                // 连续因子数（用于计算 α）
+                designMeta["k_continuous"] = batch.Factors.Count(f => !f.IsCategorical);
+            }
+            factorTypesDict["__design_meta__"] = designMeta;
+
             var factorTypesJson = JsonConvert.SerializeObject(factorTypesDict);
 
             using (Py.GIL())
@@ -120,15 +162,10 @@ namespace MaxChemical.Modules.DOE.Services
         // ★ v13: 统一 OLS 结果解析方法
         // ═══════════════════════════════════════════════════════
 
-        /// <summary>
-        /// 从 Python OLS 结果统一解析为 C# 对象
-        /// 包含编码值系数、未编码系数、编码/未编码方程、编码信息
-        /// </summary>
         private OLSAnalysisResult ParseOLSResult(PythonOLSResult pyResult, string defaultModelType = "quadratic")
         {
             var result = new OLSAnalysisResult();
 
-            // ANOVA 表
             if (pyResult.AnovaTable != null)
             {
                 result.AnovaTable = pyResult.AnovaTable.Select(row => new AnovaRow
@@ -142,7 +179,6 @@ namespace MaxChemical.Modules.DOE.Services
                 }).ToList();
             }
 
-            // 编码值系数（含 SE/T/P/VIF）
             if (pyResult.Coefficients != null)
             {
                 result.Coefficients = pyResult.Coefficients.Select(c => new CoefficientRow
@@ -156,7 +192,6 @@ namespace MaxChemical.Modules.DOE.Services
                 }).ToList();
             }
 
-            // ★ v13: 未编码系数（只有 term + coeff）
             if (pyResult.UncodedCoefficients != null)
             {
                 result.UncodedCoefficients = pyResult.UncodedCoefficients.Select(c => new UncCodedCoefficientRow
@@ -170,7 +205,6 @@ namespace MaxChemical.Modules.DOE.Services
                 }).ToList();
             }
 
-            // 模型摘要
             if (pyResult.ModelSummary != null)
             {
                 result.ModelSummary = new OLSModelSummary
@@ -188,12 +222,10 @@ namespace MaxChemical.Modules.DOE.Services
                 };
             }
 
-            // ★ v13: 未编码方程 + 编码信息
             result.UncodedEquation = pyResult.UncodedEquation ?? "";
             result.UncodedEquations = pyResult.UncodedEquations;
             result.CodingInfo = pyResult.CodingInfo ?? new();
 
-            // v7: 不可估计项信息
             result.DroppedTerms = pyResult.DroppedTerms ?? new();
             result.InestimableWarning = pyResult.InestimableWarning ?? "";
             result.OriginalModelType = pyResult.OriginalModelType ?? defaultModelType;
@@ -202,7 +234,6 @@ namespace MaxChemical.Modules.DOE.Services
             result.Sigma = pyResult.Sigma;
             result.TCrit = pyResult.TCrit;
             result.ParamCount = pyResult.ParamCount;
-
 
             return result;
         }
@@ -214,6 +245,7 @@ namespace MaxChemical.Modules.DOE.Services
         public async Task<OLSAnalysisResult> FitOlsAsync(string batchId, string responseName, string modelType = "quadratic")
         {
             EnsureReady();
+            _lastModelType = modelType;  // ★ v14: 记住模型类型
             await LoadBatchDataAsync(batchId, responseName);
 
             _logger.LogInformation("FitOLS: batchId={BatchId}, response={Response}, model={Model}",
@@ -313,7 +345,7 @@ namespace MaxChemical.Modules.DOE.Services
             await LoadBatchDataAsync(batchId, responseName);
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 string fixedJson = fixedValues != null ? JsonConvert.SerializeObject(fixedValues) : "";
                 return _analyzer!.prediction_profiler(gridSize, fixedJson).ToString();
             }
@@ -325,7 +357,7 @@ namespace MaxChemical.Modules.DOE.Services
             await LoadBatchDataAsync(batchId, responseName);
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 return _analyzer!.find_optimal(maximize).ToString();
             }
         }
@@ -342,7 +374,7 @@ namespace MaxChemical.Modules.DOE.Services
             var boundsJson = await BuildBoundsJsonAsync(batchId);
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 return _analyzer!.response_surface_data_ols(factor1, factor2, gridSize, boundsJson).ToString();
             }
         }
@@ -355,7 +387,7 @@ namespace MaxChemical.Modules.DOE.Services
             var boundsJson = await BuildBoundsJsonAsync(batchId);
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 string base64 = _analyzer!.response_surface_image_ols(factor1, factor2, 50, 800, 600, boundsJson).ToString();
                 return string.IsNullOrEmpty(base64) ? Array.Empty<byte>() : Convert.FromBase64String(base64);
             }
@@ -369,7 +401,7 @@ namespace MaxChemical.Modules.DOE.Services
             var boundsJson = await BuildBoundsJsonAsync(batchId);
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 return _analyzer!.contour_data_ols(factor1, factor2, gridSize, boundsJson).ToString();
             }
         }
@@ -384,7 +416,7 @@ namespace MaxChemical.Modules.DOE.Services
             await LoadBatchDataAsync(batchId, responseName);
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 return _analyzer!.outlier_analysis().ToString();
             }
         }
@@ -453,7 +485,7 @@ namespace MaxChemical.Modules.DOE.Services
             await LoadBatchDataAsync(batchId, responseName);
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 return _analyzer!.box_cox_analysis().ToString();
             }
         }
@@ -482,7 +514,7 @@ namespace MaxChemical.Modules.DOE.Services
             await LoadBatchDataAsync(batchId, responseName);
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 return _analyzer!.export_ols_report(outputPath, title).ToString();
             }
         }
@@ -639,9 +671,9 @@ namespace MaxChemical.Modules.DOE.Services
                 }
             }
         }
+
         /// <summary>
-        /// ★ 新增: 直接数据导入 OLS 分析（不通过批次）
-        /// 数据由调用方从 Excel 读取后传入，绕过 LoadBatchDataAsync
+        /// 直接数据导入 OLS 分析（不通过批次）
         /// </summary>
         public Task<OLSAnalysisResult> FitOlsDirectAsync(
             List<Dictionary<string, object>> factorsData,
@@ -651,6 +683,7 @@ namespace MaxChemical.Modules.DOE.Services
             string modelType = "quadratic")
         {
             EnsureReady();
+            _lastModelType = modelType;  // ★ v14: 记住模型类型
 
             var factorsJson = JsonConvert.SerializeObject(factorsData);
             var responsesJson = JsonConvert.SerializeObject(responsesData);
@@ -663,7 +696,6 @@ namespace MaxChemical.Modules.DOE.Services
 
             using (Py.GIL())
             {
-                // 直接加载数据（不走批次）
                 _analyzer!.load_data(factorsJson, responsesJson, responseName, factorTypesJson);
 
                 string resultJson = _analyzer!.fit_ols(modelType).ToString();
@@ -683,15 +715,16 @@ namespace MaxChemical.Modules.DOE.Services
                 _logger.LogInformation("FitOLS Direct 完成: R²={R2}, 系数数={Count}",
                     result.ModelSummary?.RSquared, result.Coefficients?.Count);
 
-                // 清除批次缓存标记，防止后续方法误用
                 _loadedBatchId = "";
                 _loadedResponseName = responseName;
 
                 return Task.FromResult(result);
             }
         }
+
         // ═══════════════════════════════════════════════════════
-        // ★ 新增: Direct 模式方法（analyzer 已有数据和模型）
+        // Direct 模式方法（analyzer 已有数据和模型）
+        // ★ v14: 全部改为 _lastModelType
         // ═══════════════════════════════════════════════════════
 
         public string GetEffectsParetoDirectAsync(string responseName, double alpha = 0.05)
@@ -723,7 +756,7 @@ namespace MaxChemical.Modules.DOE.Services
             EnsureReady();
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 return _analyzer!.outlier_analysis().ToString();
             }
         }
@@ -733,7 +766,7 @@ namespace MaxChemical.Modules.DOE.Services
             EnsureReady();
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 return _analyzer!.box_cox_analysis().ToString();
             }
         }
@@ -743,7 +776,7 @@ namespace MaxChemical.Modules.DOE.Services
             EnsureReady();
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 return _analyzer!.response_surface_data_ols(factor1, factor2, gridSize, boundsJson).ToString();
             }
         }
@@ -753,7 +786,7 @@ namespace MaxChemical.Modules.DOE.Services
             EnsureReady();
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 string base64 = _analyzer!.response_surface_image_ols(factor1, factor2, 50, 800, 600, boundsJson).ToString();
                 return string.IsNullOrEmpty(base64) ? Array.Empty<byte>() : Convert.FromBase64String(base64);
             }
@@ -764,7 +797,7 @@ namespace MaxChemical.Modules.DOE.Services
             EnsureReady();
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 return _analyzer!.contour_data_ols(factor1, factor2, gridSize, boundsJson).ToString();
             }
         }
@@ -774,7 +807,7 @@ namespace MaxChemical.Modules.DOE.Services
             EnsureReady();
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 return _analyzer!.prediction_profiler(gridSize, fixedValuesJson).ToString();
             }
         }
@@ -784,19 +817,21 @@ namespace MaxChemical.Modules.DOE.Services
             EnsureReady();
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 return _analyzer!.find_optimal(maximize).ToString();
             }
         }
+
         public string GetTukeyHSDDirectAsync(string responseName, string categoricalFactorName)
         {
             EnsureReady();
             using (Py.GIL())
             {
-                _analyzer!.fit_ols("quadratic");
+                _analyzer!.fit_ols(_lastModelType);
                 return _analyzer!.tukey_hsd(categoricalFactorName).ToString();
             }
         }
+
         // ═══════════════════════════════════════════════════════
         // Python 结果反序列化类
         // ═══════════════════════════════════════════════════════
@@ -808,12 +843,10 @@ namespace MaxChemical.Modules.DOE.Services
             [JsonProperty("coefficients")] public List<PyCoeffRow>? Coefficients { get; set; }
             [JsonProperty("model_summary")] public PyModelSummary? ModelSummary { get; set; }
 
-            // v7
             [JsonProperty("dropped_terms")] public List<string>? DroppedTerms { get; set; }
             [JsonProperty("inestimable_warning")] public string? InestimableWarning { get; set; }
             [JsonProperty("original_model_type")] public string? OriginalModelType { get; set; }
 
-            // ★ v13 新增
             [JsonProperty("uncoded_coefficients")] public List<PyUncodedCoeffRow>? UncodedCoefficients { get; set; }
             [JsonProperty("uncoded_equation")] public string? UncodedEquation { get; set; }
             [JsonProperty("uncoded_equations")] public EquationsInfo? UncodedEquations { get; set; }

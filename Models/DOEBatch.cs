@@ -64,6 +64,7 @@ namespace MaxChemical.Modules.DOE.Models
         CCD,
         BoxBehnken,
         DOptimal,
+        PlackettBurman,         // ★ 新增: Plackett-Burman 筛选设计
         // ★ 新增: 项目迭代专用设计方法
         SteepestAscent,     // 最速上升/下降
         AugmentedDesign,    // 增强设计（在已有数据基础上补点）

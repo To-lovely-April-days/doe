@@ -246,7 +246,11 @@ namespace MaxChemical.Modules.DOE.ViewModels
         private const int PAGE_SIZE = 10;
         private string _currentFlowId = "";
         private string _currentBatchId = "";
-
+        // ── ★ v18: 弯曲修正参数 ──
+        private bool _hasCurvatureCorrection;
+        private double _ctPtCoeff;
+        private double _cornerMean;
+        private double _centerMean;
         // Tab 切换
         private bool _isGprTabSelected = true;
 
@@ -1796,6 +1800,17 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 IsProfilerLoaded = true;
                 // ★ v9: 初始化 C# 端预测器（用于拖动时实时计算）
                 InitializeCSharpPredictor();
+                //// ★ v18: 初始加载后立即用 C# 预测器刷新一次（应用弯曲修正 + 正确的 CI）
+                if (_csharpPredictor?.IsReady == true)
+                {
+                    // 取第一个因子名触发一次完整的 UpdateProfilerLocal
+                    var firstFactor = _profilerFactorOrder.FirstOrDefault();
+                    if (firstFactor != null && _profilerCurrentValues.TryGetValue(firstFactor, out var firstVal))
+                    {
+                        UpdateProfilerLocal(firstFactor, firstVal);
+                    }
+                }
+
                 OlsStatusText = $"预测刻画器已生成 ({data.Factors.Count} 个因子) — 拖动红色竖线可交互调整";
             }
             catch (Exception ex)
@@ -1812,6 +1827,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
         {
             if (OlsResult?.Coefficients == null || OlsResult.CodingInfo == null)
             {
+                _logger.LogWarning("CI调试: Coefficients 或 CodingInfo 为 null，跳过预测器初始化");
                 _csharpPredictor = null;
                 return;
             }
@@ -1839,14 +1855,32 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 }
             }
 
+            // ★ v18 修复: 过滤掉 Ct Pt 项（弯曲检验专用，不参与常规预测）
+            var filteredCoefficients = OlsResult.Coefficients
+                .Where(c => c.Term != "Ct Pt" && c.Term != "弯曲")
+                .ToList();
+
             _csharpPredictor.Initialize(
-                OlsResult.Coefficients, OlsResult.CodingInfo,
-                allFactorNames, categoricalFactors, categoricalLevels, factorRanges);
+                 filteredCoefficients, OlsResult.CodingInfo,
+                 allFactorNames, categoricalFactors, categoricalLevels, factorRanges);
+            // ★ v18: 保存弯曲修正参数
+            _hasCurvatureCorrection = OlsResult.CurvatureTest?.HasCurvatureTest == true;
+            _ctPtCoeff = _hasCurvatureCorrection ? OlsResult.CurvatureTest!.CtPtCoefficient : 0;
 
             if (OlsResult.XtxInvFlat != null && OlsResult.XtxInvFlat.Length > 0 && OlsResult.Sigma > 0)
-            {
+            {// 在 SetCIParameters 调用前加：
+               
                 _csharpPredictor.SetCIParameters(
                     OlsResult.XtxInvFlat, OlsResult.Sigma, OlsResult.TCrit, OlsResult.ParamCount);
+            }
+
+            // ★ v18 新增: 保存弯曲修正参数（用于 profiler 曲线叠加）
+            _hasCurvatureCorrection = OlsResult.CurvatureTest?.HasCurvatureTest == true;
+            if (_hasCurvatureCorrection)
+            {
+                _ctPtCoeff = OlsResult.CurvatureTest!.CtPtCoefficient;
+                _cornerMean = OlsResult.CurvatureTest.CornerMean;
+                _centerMean = OlsResult.CurvatureTest.CenterMean;
             }
 
             // 锁定 Y 轴范围
@@ -1870,33 +1904,15 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 _profilerYMin -= yPad;
                 _profilerYMax += yPad;
             }
-            // ★ 调试: 验证 C# 预测器和 Python 的预测值是否一致
-            if (_csharpPredictor.IsReady && _lastProfilerData != null)
+
+            // 调试日志
+            if (_csharpPredictor.IsReady)
             {
-                double pyPredicted = _lastProfilerData.CurrentPredicted;
-                double csPredicted = _csharpPredictor.Predict(_profilerCurrentValues);
                 _logger.LogInformation(
-                    "预测器验证: Python={PyPred:F6}, C#={CsPred:F6}, 差异={Diff:F6}",
-                    pyPredicted, csPredicted, Math.Abs(pyPredicted - csPredicted));
+                    "C# 预测器已初始化: 项数={TermCount}, CI={HasCI}, 弯曲修正={HasCurv}, CtPt={CtPt:F4}",
+                    filteredCoefficients.Count, OlsResult.XtxInvFlat?.Length > 0,
+                    _hasCurvatureCorrection, _hasCurvatureCorrection ? _ctPtCoeff : 0);
             }
-            // ★ 调试: 打印系数表
-            if (_csharpPredictor.IsReady)
-            {
-                _logger.LogInformation("=== 系数表 ===");
-                foreach (var c in OlsResult.Coefficients)
-                    _logger.LogInformation("  [{Term}] = {Coeff:F6}", c.Term, c.Coefficient);
-
-                _logger.LogInformation("=== 当前因子值 ===");
-                foreach (var kv in _profilerCurrentValues)
-                    _logger.LogInformation("  {Key} = {Value}", kv.Key, kv.Value);
-
-                _logger.LogInformation("=== CodingInfo ===");
-                foreach (var kv in OlsResult.CodingInfo)
-                    _logger.LogInformation("  {Key}: type={Type}, center={Center}, half_range={HR}",
-                        kv.Key, kv.Value.Type, kv.Value.Center, kv.Value.HalfRange);
-            }
-            if (_csharpPredictor.IsReady)
-                _logger.LogInformation("C# 预测器已初始化（含CI），拖动将使用本地计算");
         }
         /// <summary>
         /// ★ v6: 从 code-behind 调用 — 用户拖动红色竖线后更新所有图
@@ -1975,6 +1991,65 @@ namespace MaxChemical.Modules.DOE.ViewModels
             // 重算所有因子的曲线 + CI
             var sweepResults = _csharpPredictor.SweepAllFactors(_profilerCurrentValues, 50);
 
+            // ★ v18: 叠加弯曲修正（全因子+中心点时，让直线变抛物线）
+            if (_hasCurvatureCorrection && Math.Abs(_ctPtCoeff) > 1e-10)
+            {
+                // 1. 修正当前预测值
+                double currentCurvAdj = ComputeCurvatureAdjustment(_profilerCurrentValues);
+                currentPredicted += currentCurvAdj;
+                ciLo += currentCurvAdj;
+                ciHi += currentCurvAdj;
+
+                // 2. 修正每条扫描曲线
+                foreach (var kv in sweepResults)
+                {
+                    if (kv.Value.IsCategorical) continue;
+                    if (OlsResult?.CodingInfo == null) continue;
+                    if (!OlsResult.CodingInfo.TryGetValue(kv.Key, out var ci)) continue;
+                    if (ci.Type == "categorical") continue;
+
+                    double center = ci.Center ?? 0;
+                    double halfRange = ci.HalfRange ?? 1;
+                    if (halfRange < 1e-10) continue;
+
+                    for (int i = 0; i < kv.Value.X.Count; i++)
+                    {
+                        // 扫描因子的编码值
+                        double codedSweep = (kv.Value.X[i] - center) / halfRange;
+
+                        // 其他因子的编码值平方和
+                        double otherCodedSqSum = 0;
+                        int otherCount = 0;
+                        foreach (var fkv in _profilerCurrentValues)
+                        {
+                            if (fkv.Key == kv.Key) continue;
+                            if (!OlsResult.CodingInfo.TryGetValue(fkv.Key, out var otherCi)) continue;
+                            if (otherCi.Type == "categorical") continue;
+                            double oCenter = otherCi.Center ?? 0;
+                            double oHR = otherCi.HalfRange ?? 1;
+                            if (oHR < 1e-10) continue;
+                            double oVal = Convert.ToDouble(fkv.Value);
+                            double oCoded = (oVal - oCenter) / oHR;
+                            otherCodedSqSum += oCoded * oCoded;
+                            otherCount++;
+                        }
+
+                        // 弯曲修正 = CtPt × (1 - 各因子编码值平方的平均)
+                        // 扫描因子用当前格点值，其他因子用固定值
+                        int totalCont = otherCount + 1;
+                        double avgCodedSq = (codedSweep * codedSweep + otherCodedSqSum) / totalCont;
+                        int nCorner = OlsResult.CurvatureTest?.CornerCount ?? 1;
+                        int nCenter = OlsResult.CurvatureTest?.CenterCount ?? 1;
+                        double weight = (double)nCenter / (nCorner + nCenter);
+                        double adj = _ctPtCoeff * weight * (1.0 - avgCodedSq);
+
+                        kv.Value.Y[i] += adj;
+                        kv.Value.YLower[i] += adj;
+                        kv.Value.YUpper[i] += adj;
+                    }
+                }
+            }
+
             // 更新缓存数据
             foreach (var kv in sweepResults)
             {
@@ -2007,6 +2082,41 @@ namespace MaxChemical.Modules.DOE.ViewModels
             // 刷新意愿行
             if (IsDesirabilityVisible)
                 RefreshDesirabilityPlotsInPlace();
+        }
+        /// <summary>
+        /// ★ v18: 计算弯曲修正量
+        /// 修正量 = CtPt × (1 - 各连续因子编码值平方的平均)
+        /// 中心点处(所有coded=0) → 修正最大 = CtPt
+        /// 角点处(所有coded=±1) → 修正 = 0
+        /// </summary>
+        private double ComputeCurvatureAdjustment(Dictionary<string, object> factorValues)
+        {
+            if (!_hasCurvatureCorrection || OlsResult?.CodingInfo == null || OlsResult.CurvatureTest == null)
+                return 0;
+
+            double totalCodedSq = 0;
+            int contCount = 0;
+            foreach (var kv in factorValues)
+            {
+                if (!OlsResult.CodingInfo.TryGetValue(kv.Key, out var ci)) continue;
+                if (ci.Type == "categorical") continue;
+                double center = ci.Center ?? 0;
+                double halfRange = ci.HalfRange ?? 1;
+                if (halfRange < 1e-10) continue;
+                double coded = (Convert.ToDouble(kv.Value) - center) / halfRange;
+                totalCodedSq += coded * coded;
+                contCount++;
+            }
+
+            if (contCount == 0) return 0;
+            double avgCodedSq = totalCodedSq / contCount;
+
+            // ★ v18 修正: JMP 的弯曲修正按样本量加权
+            int nCorner = OlsResult.CurvatureTest.CornerCount;
+            int nCenter = OlsResult.CurvatureTest.CenterCount;
+            double weight = (double)nCenter / (nCorner + nCenter);
+
+            return _ctPtCoeff * weight * (1.0 - avgCodedSq);
         }
         /// <summary>
         /// ★ 新增: 根据当前预测刻画器数据，计算当前位置的置信区间文本
@@ -4691,20 +4801,12 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
             try
             {
-                string json;
                 var fixedValues = new Dictionary<string, object>(DesirabilityResult.OptimalFactors);
+                var fixedJson = JsonConvert.SerializeObject(fixedValues);
 
-                if (IsDirectImportMode)
-                {
-                    var fixedJson = JsonConvert.SerializeObject(fixedValues);
-                    json = await Task.Run(() =>
-                        _analysisService.GetPredictionProfilerDirectAsync(_selectedResponseName, 50, fixedJson));
-                }
-                else
-                {
-                    json = await _analysisService.GetPredictionProfilerAsync(
-                        SelectedOlsBatch!.BatchId, _selectedResponseName, 50, fixedValues);
-                }
+                // ★ v18: 用当前模型获取刻画器数据（不重新 fit）
+                string json = await Task.Run(() =>
+                    _analysisService.GetPredictionProfilerFromCurrentModel(50, fixedJson));
 
                 var data = JsonConvert.DeserializeObject<ProfilerResult>(json);
                 if (data?.Factors != null)

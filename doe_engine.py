@@ -1787,6 +1787,7 @@ class DOEAnalyzer:
         self._design_method = ""  # ★ v17: 保存设计方法，用于全因子弯曲检验判断
         self._curvature_mse = None  # ★ v17: 弯曲检验合并 MSE（供 Pareto 使用）
         self._curvature_df_error = None  # ★ v17: 弯曲检验误差 DF
+        self._curvature_ci_params = None  # ★ v18: 弯曲检验 CI 参数（供 prediction_profiler 使用）
 
     def load_data(self, factors_json: str, responses_json: str, response_name: str,
                   factor_types_json: str = "{}") -> str:
@@ -1952,6 +1953,20 @@ class DOEAnalyzer:
                     self._curvature_mse = curvature_result["model_summary"]["mse"]
                     self._curvature_df_error = curvature_result["model_summary"]["df_error"]
                     
+                    # ★ v18: 保存弯曲检验的合并误差 CI 参数，供 prediction_profiler 使用
+                    # CI 的 df = error_df + curvature_df（对齐 JMP）
+                    _curv_error_df = curvature_result["model_summary"]["df_error"]
+                    _curv_curvature_df = curvature_result["curvature"]["curvature_df"]
+                    _curv_ci_df = _curv_error_df + _curv_curvature_df
+                    self._curvature_ci_params = {
+                        "sigma": curvature_result.get("sigma", 0.0),
+                        "error_df": _curv_ci_df,
+                        "XtX_inv": np.array(curvature_result.get("xtx_inv_flat", [])).reshape(
+                            curvature_result.get("param_count", 0),
+                            curvature_result.get("param_count", 0)
+                        ) if curvature_result.get("param_count", 0) > 0 else None,
+                    }
+                    
                     return json.dumps({
                         "anova_table": curvature_result["anova_table"],
                         "coefficients": curvature_result["coefficients"],
@@ -1973,6 +1988,7 @@ class DOEAnalyzer:
             # ★ v17: 非弯曲检验路径，清空弯曲 MSE（确保 Pareto 走正常逻辑）
             self._curvature_mse = None
             self._curvature_df_error = None
+            self._curvature_ci_params = None  # ★ v18: 清空弯曲 CI 参数
 
             # ★ v7: 构建公式
             if model_type == "custom" and terms_json:
@@ -2621,20 +2637,38 @@ class DOEAnalyzer:
             pass
         
         # ── CI 导出参数 ──
+        # ★ v18: 用全部数据（角点+中心点）的设计矩阵计算 XtX_inv（不含 Ct Pt 列）
+        # CI 的 error_df = 弯曲df + 纯误差df（JMP 把弯曲项的自由度也纳入 CI 的误差）
         ci_export = {}
         try:
-            n_obs_corner = X.shape[0]
-            p_params = X.shape[1]
+            import patsy
+            design_info = model.model.data.orig_exog.design_info
+            X_full = np.asarray(patsy.build_design_matrices([design_info], df_safe)[0])
+            p_params = X_full.shape[1]
+            XtX_inv_full = np.linalg.inv(X_full.T @ X_full)
             sigma_val = round(s, 8)
-            t_crit_val = round(float(sp_stats.t.ppf(0.975, error_df)), 6)
+            # ★ v18: CI 的 df = error_df + curvature_df（对齐 JMP）
+            ci_df = error_df + curvature_df
+            t_crit_val = round(float(sp_stats.t.ppf(0.975, ci_df)), 6)
             ci_export = {
-                "xtx_inv_flat": [round(v, 10) for v in XtX_inv.flatten().tolist()],
+                "xtx_inv_flat": [round(v, 10) for v in XtX_inv_full.flatten().tolist()],
                 "sigma": sigma_val,
                 "t_crit": t_crit_val,
                 "param_count": p_params
             }
         except Exception:
-            ci_export = {"xtx_inv_flat": [], "sigma": 0.0, "t_crit": 0.0, "param_count": 0}
+            try:
+                p_params = X.shape[1]
+                sigma_val = round(s, 8)
+                t_crit_val = round(float(sp_stats.t.ppf(0.975, error_df)), 6)
+                ci_export = {
+                    "xtx_inv_flat": [round(v, 10) for v in XtX_inv.flatten().tolist()],
+                    "sigma": sigma_val,
+                    "t_crit": t_crit_val,
+                    "param_count": p_params
+                }
+            except Exception:
+                ci_export = {"xtx_inv_flat": [], "sigma": 0.0, "t_crit": 0.0, "param_count": 0}
         
         # ── 模型摘要 ──
         model_p_overall = round(model_p_, 6)
@@ -3278,7 +3312,20 @@ class DOEAnalyzer:
             ci_model = self._model_sum if self._model_sum is not None else self._model
             try:
                 import patsy
-                ci_sigma = np.sqrt(float(ci_model.mse_resid))
+                # ★ v18 修复: 弯曲检验模式下使用合并误差（角点饱和模型 mse_resid=0）
+                if hasattr(self, '_curvature_ci_params') and self._curvature_ci_params is not None:
+                    ci_sigma = self._curvature_ci_params["sigma"]
+                    # ★ v18: 用全部数据（角点+中心点）的 XtX_inv 计算杠杆值
+                    ci_XtX_inv = self._curvature_ci_params.get("XtX_inv")
+                    if ci_XtX_inv is not None:
+                        design_info = ci_model.model.data.orig_exog.design_info
+                        x0_row = patsy.build_design_matrices([design_info], df_point)[0]
+                        x0 = np.asarray(x0_row)[0]
+                        hat_value = float(x0 @ ci_XtX_inv @ x0)
+                        se_mean = ci_sigma * np.sqrt(max(hat_value, 0.0))
+                        return pred_val, round(float(se_mean), 6)
+                else:
+                    ci_sigma = np.sqrt(float(ci_model.mse_resid))
                 design_info = ci_model.model.data.orig_exog.design_info
                 x0_row = patsy.build_design_matrices([design_info], df_point)[0]
                 x0 = np.asarray(x0_row)[0]
@@ -3550,6 +3597,17 @@ class DOEAnalyzer:
                 XtX_inv = None
                 has_ci = False
 
+            # ★ v18 修复: 弯曲检验模式下，角点模型是饱和的 (mse_resid≈0)
+            # 需要用合并误差（含中心点纯误差）替代，否则 CI 全为 0
+            if hasattr(self, '_curvature_ci_params') and self._curvature_ci_params is not None:
+                _ccp = self._curvature_ci_params
+                sigma = _ccp["sigma"]
+                df_error = _ccp["error_df"]
+                t_crit = float(sp_stats.t.ppf(1 - alpha / 2, df_error))
+                if _ccp["XtX_inv"] is not None:
+                    XtX_inv = _ccp["XtX_inv"]
+                    has_ci = True
+
             result = {"factors": {}}
 
             for factor in self._factor_names:
@@ -3625,10 +3683,14 @@ class DOEAnalyzer:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
     def find_optimal(self, maximize: bool = True, n_restarts: int = 20) -> str:
+        """
+        ★ v18 重写: 使用 differential_evolution 全局优化器替代 L-BFGS-B 多次重启
+        对标 JMP/Minitab 的全局搜索能力，避免局部最优
+        """
         if self._model is None or self._df is None:
             return json.dumps({"error": "模型未拟合", "success": False}, ensure_ascii=False)
         try:
-            from scipy.optimize import minimize
+            from scipy.optimize import differential_evolution
             cont_factors = self._continuous_factors
             cat_factors = self._categorical_factors
             cont_bounds = {}
@@ -3655,26 +3717,32 @@ class DOEAnalyzer:
                         global_best_factors = dict(point)
                     continue
                 bounds_list = [(cont_bounds[f][0], cont_bounds[f][1]) for f in cont_factors]
-                for _ in range(n_restarts):
-                    x0 = np.array([np.random.uniform(cont_bounds[f][0], cont_bounds[f][1]) for f in cont_factors])
-                    def objective(x):
-                        point = dict(cat_dict)
+                def objective(x):
+                    point = dict(cat_dict)
+                    for i, f in enumerate(cont_factors):
+                        point[f] = float(x[i])
+                    pred_json = self.predict_point(json.dumps(point, ensure_ascii=False))
+                    pred_val = json.loads(pred_json).get("predicted", 0.0)
+                    return -pred_val if maximize else pred_val
+                try:
+                    # ★ v18: differential_evolution 全局优化，不依赖初始点
+                    res = differential_evolution(
+                        objective, bounds=bounds_list,
+                        maxiter=500, tol=1e-10, seed=42,
+                        polish=True,       # 最后用 L-BFGS-B 精修
+                        init='sobol',      # Sobol 序列初始化，覆盖更均匀
+                        mutation=(0.5, 1.5),
+                        recombination=0.9
+                    )
+                    val = -res.fun if maximize else res.fun
+                    if (maximize and val > global_best_val) or (not maximize and val < global_best_val):
+                        global_best_val = val
+                        best_point = dict(cat_dict)
                         for i, f in enumerate(cont_factors):
-                            point[f] = float(x[i])
-                        pred_json = self.predict_point(json.dumps(point, ensure_ascii=False))
-                        pred_val = json.loads(pred_json).get("predicted", 0.0)
-                        return -pred_val if maximize else pred_val
-                    try:
-                        res = minimize(objective, x0, method='L-BFGS-B', bounds=bounds_list)
-                        val = -res.fun if maximize else res.fun
-                        if (maximize and val > global_best_val) or (not maximize and val < global_best_val):
-                            global_best_val = val
-                            best_point = dict(cat_dict)
-                            for i, f in enumerate(cont_factors):
-                                best_point[f] = float(res.x[i])
-                            global_best_factors = best_point
-                    except Exception:
-                        continue
+                            best_point[f] = float(res.x[i])
+                        global_best_factors = best_point
+                except Exception:
+                    pass
             if global_best_factors is None:
                 return json.dumps({"error": "优化失败", "success": False}, ensure_ascii=False)
             in_range = True

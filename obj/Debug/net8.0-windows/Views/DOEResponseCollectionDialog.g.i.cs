@@ -76,7 +76,8 @@ namespace MaxChemical.Modules.DOE.Views {
                 return;
             }
             _contentLoaded = true;
-            System.Uri resourceLocater = new System.Uri("/MaxChemical.Modules.DOE;component/views/doeresponsecollectiondialog.xaml", System.UriKind.Relative);
+            System.Uri resourceLocater = new System.Uri("/MaxChemical.Modules.DOE;V1.0.0.0;component/views/doeresponsecollectiondialog.xam" +
+                    "l", System.UriKind.Relative);
             
             #line 1 "..\..\..\..\Views\DOEResponseCollectionDialog.xaml"
             System.Windows.Application.LoadComponent(this, resourceLocater);

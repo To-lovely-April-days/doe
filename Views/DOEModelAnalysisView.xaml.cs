@@ -260,43 +260,52 @@ namespace MaxChemical.Modules.DOE.Views
                 vm.IsCodedEquation = !vm.IsCodedEquation;
             }
         }
-        private void DesirabilityMenu_Click(object sender, RoutedEventArgs e)
+        private void DesirabilityDropdown_Click(object sender, MouseButtonEventArgs e)
         {
-            var menu = new ContextMenu();
             var vm = DataContext as DOEModelAnalysisViewModel;
             if (vm == null) return;
 
-            var item1 = new MenuItem { Header = "意愿函数", IsCheckable = true, IsChecked = vm.IsDesirabilityVisible };
-            item1.Click += (s, _) => vm.ToggleDesirabilityCommand.Execute();
-            menu.Items.Add(item1);
+            var menu = new ContextMenu();
+
+            // ── 显隐切换 ──
+            var itemToggle = new MenuItem
+            {
+                Header = "显示意愿行",
+                IsCheckable = true,
+                IsChecked = vm.IsDesirabilityVisible
+            };
+            itemToggle.Click += (s, _) => vm.ToggleDesirabilityCommand.Execute();
+            menu.Items.Add(itemToggle);
 
             menu.Items.Add(new Separator());
 
-            var item2 = new MenuItem { Header = "最大化意愿" };
-            item2.Click += (s, _) => vm.MaximizeDesirabilityCommand.Execute();
-            menu.Items.Add(item2);
+            // ── 优化 ──
+            var itemMaxD = new MenuItem { Header = "最大化意愿" };
+            itemMaxD.Click += (s, _) => vm.MaximizeDesirabilityCommand.Execute();
+            menu.Items.Add(itemMaxD);
 
-            var item3 = new MenuItem { Header = "最大化并记住" };
-            item3.Click += (s, _) => vm.MaximizeAndRememberCommand.Execute();
-            menu.Items.Add(item3);
+            var itemMaxRemember = new MenuItem { Header = "最大化并记住" };
+            itemMaxRemember.Click += (s, _) => vm.MaximizeAndRememberCommand.Execute();
+            menu.Items.Add(itemMaxRemember);
 
             menu.Items.Add(new Separator());
 
-            var item6 = new MenuItem { Header = "保存意愿" };
-            item6.Click += (s, _) => vm.SaveDesirabilityCommand.Execute();
-            menu.Items.Add(item6);
+            // ── 配置 ──
+            var itemSetup = new MenuItem { Header = "设置意愿..." };
+            itemSetup.Click += (s, _) => vm.SetDesirabilityCommand.Execute();
+            menu.Items.Add(itemSetup);
 
-            var item7 = new MenuItem { Header = "设置意愿..." };
-            item7.Click += (s, _) => vm.SetDesirabilityCommand.Execute();
-            menu.Items.Add(item7);
+            var itemSave = new MenuItem { Header = "保存意愿值" };
+            itemSave.Click += (s, _) => vm.SaveDesirabilityCommand.Execute();
+            menu.Items.Add(itemSave);
 
-            var item8 = new MenuItem { Header = "保存意愿公式" };
-            item8.Click += (s, _) => vm.SaveDesirabilityFormulaCommand.Execute();
-            menu.Items.Add(item8);
+            var itemFormula = new MenuItem { Header = "保存意愿公式" };
+            itemFormula.Click += (s, _) => vm.SaveDesirabilityFormulaCommand.Execute();
+            menu.Items.Add(itemFormula);
 
             menu.IsOpen = true;
+            e.Handled = true;
         }
-
         /// <summary>
         /// ★ Feature 2: 意愿行鼠标按下 — 判断是否点击了红色竖线附近
         /// </summary>

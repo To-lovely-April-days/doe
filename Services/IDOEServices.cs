@@ -300,6 +300,9 @@ namespace MaxChemical.Modules.DOE.Services
 
         /// <summary>★ v17: 从当前已拟合模型获取残差（精简模型后用）</summary>
         string GetResidualDiagnosticsFromCurrentModel();
+        string FindOptimalFromCurrentModel(bool maximize = true);
+        string GetPredictionProfilerFromCurrentModel(int gridSize = 50, string fixedValuesJson = "");
+
     }
 
     // ═══════════════════════════════════════════════════════

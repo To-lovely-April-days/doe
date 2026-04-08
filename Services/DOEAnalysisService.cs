@@ -388,7 +388,6 @@ namespace MaxChemical.Modules.DOE.Services
                 return _analyzer!.find_optimal(maximize).ToString();
             }
         }
-
         // ═══════════════════════════════════════════════════════
         // OLS 响应曲面 + 等高线
         // ═══════════════════════════════════════════════════════
@@ -444,6 +443,19 @@ namespace MaxChemical.Modules.DOE.Services
         {
             EnsureReady();
             using (Py.GIL()) { return _analyzer!.residual_diagnostics().ToString(); }
+        }
+        /// <summary>★ v18: 直接用当前模型搜索最优（不重新 fit，保留精简模型）</summary>
+        public string FindOptimalFromCurrentModel(bool maximize = true)
+        {
+            EnsureReady();
+            using (Py.GIL()) { return _analyzer!.find_optimal(maximize).ToString(); }
+        }
+
+        /// <summary>★ v18: 直接用当前模型获取刻画器数据（不重新 fit）</summary>
+        public string GetPredictionProfilerFromCurrentModel(int gridSize = 50, string fixedValuesJson = "")
+        {
+            EnsureReady();
+            using (Py.GIL()) { return _analyzer!.prediction_profiler(gridSize, fixedValuesJson).ToString(); }
         }
         // ═══════════════════════════════════════════════════════
         // 异常点分析 + 排除重拟合

@@ -14,7 +14,7 @@
             <converters:BoolToOlsBackgroundConverter x:Key="BoolToBackground"/>
             <converters:InverseBoolToVisibilityConverter x:Key="InverseBoolToVis"/>
             <converters:StringNotEmptyToVisibilityConverter x:Key="StringToVis"/>
-
+            <converters:BindingProxy x:Key="VmProxy" Data="{Binding}"/>
             <!-- ★ JMP 折叠面板标题栏样式 -->
             <Style x:Key="JmpSectionToggle" TargetType="ToggleButton">
                 <Setter Property="IsChecked" Value="True"/>
@@ -730,6 +730,14 @@
                                                 </Style>
                                             </DataGridTextColumn.ElementStyle>
                                         </DataGridTextColumn>
+                                        <DataGridTextColumn Header="Effect" Binding="{Binding Effect, StringFormat={}{0:F3}}" Width="80"
+   Visibility="{Binding Data.HasCurvatureTest, Source={StaticResource VmProxy}, Converter={StaticResource BoolToVis}}">
+                                            <DataGridTextColumn.ElementStyle>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="TextAlignment" Value="Right"/>
+                                                </Style>
+                                            </DataGridTextColumn.ElementStyle>
+                                        </DataGridTextColumn>
                                         <DataGridTextColumn Header="Estimate" Binding="{Binding Coefficient, StringFormat={}{0:F6}}" Width="100">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock">
@@ -793,9 +801,9 @@
                                 </Grid>
                             </ToggleButton>
                             <StackPanel Margin="14,8,14,12" Visibility="{Binding IsChecked, ElementName=tgl_Pareto, Converter={StaticResource BoolToVis}}">
-                                <TextBlock FontSize="10" Foreground="#A0A4B0" Margin="0,0,0,6" Text="Pareto of LogWorth = −log₁₀(p-value). Click bars to toggle include/exclude."/>
+                                <TextBlock FontSize="10" Foreground="#A0A4B0" Margin="0,0,0,6" Text="{Binding ParetoSubtitle}"/>
                                 <Border BorderBrush="#E8EAED" BorderThickness="1" CornerRadius="3">
-                                    <oxy:PlotView Model="{Binding OlsParetoPlot}" Height="240" Background="White" x:Name="OlsParetoPlotView"/>
+                                    <oxy:PlotView Model="{Binding OlsParetoPlot}" Height="240" Background="White" x:Name="OlsParetoPlotView" PreviewMouseDown="OlsPareto_MouseDown"/>
                                 </Border>
                                 <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                                     <TextBlock FontSize="10" Foreground="#8A8F9C"><Run Text="Included: "/><Run Text="{Binding IncludedTermsText, Mode=OneWay}" Foreground="#1A1F36"/></TextBlock>

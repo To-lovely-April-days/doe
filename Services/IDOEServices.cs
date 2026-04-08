@@ -187,7 +187,6 @@ namespace MaxChemical.Modules.DOE.Services
         Task<string> GetPredictionProfilerAsync(string batchId, string responseName,
             int gridSize = 50, Dictionary<string, object>? fixedValues = null);
         Task<string> FindOptimalAsync(string batchId, string responseName, bool maximize = true);
-
         // ── ★ v7 新增: OLS 响应曲面 + 等高线 ──
 
         /// <summary>
@@ -296,6 +295,11 @@ namespace MaxChemical.Modules.DOE.Services
         string GetPredictionProfilerDirectAsync(string responseName, int gridSize = 50, string fixedValuesJson = "");
         string FindOptimalDirectAsync(string responseName, bool maximize = true);
         string GetTukeyHSDDirectAsync(string responseName, string categoricalFactorName);
+        /// <summary>★ v17: 从当前已拟合模型获取 Pareto（精简模型后用）</summary>
+        string GetEffectsParetoFromCurrentModel(double alpha = 0.05);
+
+        /// <summary>★ v17: 从当前已拟合模型获取残差（精简模型后用）</summary>
+        string GetResidualDiagnosticsFromCurrentModel();
     }
 
     // ═══════════════════════════════════════════════════════

@@ -1784,6 +1784,9 @@ class DOEAnalyzer:
         self._model = None
         self._model_sum = None  # ★ v8: Sum coding 模型（用于 CI 计算，与 JMP 一致）
         self._coding_info = {}
+        self._design_method = ""  # ★ v17: 保存设计方法，用于全因子弯曲检验判断
+        self._curvature_mse = None  # ★ v17: 弯曲检验合并 MSE（供 Pareto 使用）
+        self._curvature_df_error = None  # ★ v17: 弯曲检验误差 DF
 
     def load_data(self, factors_json: str, responses_json: str, response_name: str,
                   factor_types_json: str = "{}") -> str:
@@ -1817,7 +1820,8 @@ class DOEAnalyzer:
         # ★ v16: 解析设计方法元数据（__design_meta__）
         design_meta = factor_types.pop("__design_meta__", None)
         if isinstance(design_meta, dict):
-            design_method = str(design_meta.get("design_method", "")).lower()
+            self._design_method = str(design_meta.get("design_method", ""))  # ★ v17: 保存设计方法
+            design_method = self._design_method.lower()
             if design_method == "ccd":
                 ccd_alpha_type = str(design_meta.get("ccd_alpha_type", "rotatable")).lower()
                 k = int(design_meta.get("k_continuous", len([n for n in self._factor_names if factor_types.get(n) != "categorical"])))
@@ -1915,6 +1919,60 @@ class DOEAnalyzer:
                     df_safe[safe_name] = (col - center) / half_range
 
             df_safe["Y"] = self._df[self._response_name].values
+
+            # ★ v17: 全因子弯曲检验 — 当设计方法为因子型且有中心点时，对标 Minitab
+            # custom 模型（精简模型）也走弯曲路径，只是用用户选择的 terms
+            if self._is_factorial_design(self._design_method):
+                # 构建 coding_info 序列化（弯曲检验返回时需要）
+                _coding_info_for_curv = {}
+                for fname, info in self._coding_info.items():
+                    ci = {"type": info.get("type", "continuous")}
+                    if ci["type"] == "continuous":
+                        ci["center"] = round(float(info.get("center", 0.0)), 6)
+                        ci["half_range"] = round(float(info.get("half_range", 1.0)), 6)
+                    _coding_info_for_curv[fname] = ci
+                
+                # ★ v17: 解析 custom terms（精简模型时传入）
+                custom_terms_list = None
+                if model_type == "custom" and terms_json:
+                    try:
+                        custom_terms_list = json.loads(terms_json)
+                    except Exception:
+                        custom_terms_list = None
+                
+                curvature_result = self._fit_factorial_with_curvature(
+                    df_safe, safe_continuous, safe_categorical,
+                    safe_names, reverse_names,
+                    custom_terms=custom_terms_list
+                )
+                if curvature_result is not None:
+                    self._model = curvature_result["model"]
+                    self._model_treatment = curvature_result["model"]
+                    # ★ v17: 保存弯曲检验的合并 MSE 和 df_error，供 effects_pareto 使用
+                    self._curvature_mse = curvature_result["model_summary"]["mse"]
+                    self._curvature_df_error = curvature_result["model_summary"]["df_error"]
+                    
+                    return json.dumps({
+                        "anova_table": curvature_result["anova_table"],
+                        "coefficients": curvature_result["coefficients"],
+                        "uncoded_coefficients": curvature_result.get("uncoded_coefficients", []),
+                        "model_summary": curvature_result["model_summary"],
+                        "curvature_test": curvature_result["curvature"],
+                        "coding_info": _coding_info_for_curv,
+                        "uncoded_equation": curvature_result.get("uncoded_equation", ""),
+                        "uncoded_equations": curvature_result.get("uncoded_equations"),
+                        "dropped_terms": [],
+                        "inestimable_warning": "",
+                        "original_model_type": model_type,
+                        "xtx_inv_flat": curvature_result.get("xtx_inv_flat", []),
+                        "sigma": curvature_result.get("sigma", 0.0),
+                        "t_crit": curvature_result.get("t_crit", 0.0),
+                        "param_count": curvature_result.get("param_count", 0),
+                    }, ensure_ascii=False)
+
+            # ★ v17: 非弯曲检验路径，清空弯曲 MSE（确保 Pareto 走正常逻辑）
+            self._curvature_mse = None
+            self._curvature_df_error = None
 
             # ★ v7: 构建公式
             if model_type == "custom" and terms_json:
@@ -2164,6 +2222,486 @@ class DOEAnalyzer:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
     # ═══════════════════════════════════════════════════════
+    # ★ v17: 全因子弯曲检验 (Curvature Test) — 对标 Minitab
+    # ═══════════════════════════════════════════════════════
+
+    def _is_factorial_design(self, design_method_str):
+        """★ v17: 判断是否为因子型设计（需要弯曲检验的设计类型）"""
+        if not design_method_str:
+            return False
+        dm = design_method_str.lower().replace("_", "").replace("-", "")
+        return dm in (
+            "fullfactorial", "fractionalfactorial", "plackettburman", "factorial",
+        )
+
+    def _detect_center_points(self, df_coded, safe_continuous):
+        """★ v17: 检测中心点 — 编码值所有连续因子都接近 0 的行"""
+        if not safe_continuous:
+            return pd.Series([False] * len(df_coded), index=df_coded.index)
+        tolerance = 0.01
+        center_mask = pd.Series([True] * len(df_coded), index=df_coded.index)
+        for col in safe_continuous:
+            center_mask &= df_coded[col].abs() < tolerance
+        return center_mask
+
+    def _fit_factorial_with_curvature(self, df_safe, safe_continuous, safe_categorical,
+                                       safe_names, reverse_names, custom_terms=None):
+        """
+        ★ v17: Minitab 风格全因子分析 — 角点拟合模型 + 弯曲检验
+        
+        custom_terms: 精简模型时传入的项名列表（原始因子名，如 ["温度", "压力", "温度×压力"]）
+                      为 None 时构建默认的二阶交互模型（对标 Minitab 默认）
+        """
+        from scipy import stats as sp_stats
+        
+        # ── 检测中心点 ──
+        center_mask = self._detect_center_points(df_safe, safe_continuous)
+        n_center = int(center_mask.sum())
+        n_total = len(df_safe)
+        n_corner = n_total - n_center
+        
+        if n_center < 2:
+            return None
+        
+        df_corner = df_safe[~center_mask].copy().reset_index(drop=True)
+        df_center = df_safe[center_mask].copy().reset_index(drop=True)
+        
+        y_corner = df_corner["Y"].values
+        y_center = df_center["Y"].values
+        corner_mean = float(np.mean(y_corner))
+        center_mean = float(np.mean(y_center))
+        
+        # ── 构建公式 ──
+        all_cont = list(safe_continuous)
+        all_cat = list(safe_categorical)
+        all_vars = all_cont + all_cat
+        k = len(all_vars)
+        
+        from itertools import combinations
+        
+        if custom_terms is not None:
+            # ★ 精简模型: 用用户选择的项构建公式
+            terms = []
+            for ct in custom_terms:
+                safe_term = ct
+                for orig, safe in safe_names.items():
+                    safe_term = safe_term.replace(orig, safe)
+                safe_term = safe_term.replace("×", ":")
+                for cat in all_cat:
+                    orig_cat = reverse_names.get(cat, cat)
+                    if cat in safe_term and cat in safe_categorical:
+                        safe_term = safe_term.replace(cat, f"C({cat})")
+                terms.append(safe_term)
+        else:
+            # ★ 默认: 全交互模型（线性 + 所有阶交互，对标 Minitab 全因子默认）
+            terms = []
+            for v in all_cont:
+                terms.append(v)
+            for v in all_cat:
+                terms.append(f"C({v})")
+            
+            for order in range(2, k + 1):
+                for combo in combinations(range(k), order):
+                    term_parts = []
+                    for idx in combo:
+                        v = all_vars[idx]
+                        if v in all_cat:
+                            term_parts.append(f"C({v})")
+                        else:
+                            term_parts.append(v)
+                    terms.append(":".join(term_parts))
+        
+        formula = "Y ~ " + " + ".join(terms) if terms else "Y ~ 1"
+        
+        # ── 用角点拟合 ──
+        try:
+            model = ols(formula, data=df_corner).fit()
+        except Exception:
+            # 如果饱和导致拟合失败，减少高阶交互项重试
+            terms_reduced = []
+            for v in all_cont:
+                terms_reduced.append(v)
+            for v in all_cat:
+                terms_reduced.append(f"C({v})")
+            for i in range(len(all_vars)):
+                for j in range(i + 1, len(all_vars)):
+                    v1 = f"C({all_vars[i]})" if all_vars[i] in all_cat else all_vars[i]
+                    v2 = f"C({all_vars[j]})" if all_vars[j] in all_cat else all_vars[j]
+                    terms_reduced.append(f"{v1}:{v2}")
+            formula = "Y ~ " + " + ".join(terms_reduced)
+            model = ols(formula, data=df_corner).fit()
+        
+        # ── 弯曲检验 ──
+        d = center_mean - corner_mean
+        curvature_ss = (n_corner * n_center) / (n_corner + n_center) * d ** 2
+        curvature_df = 1
+        curvature_ms = curvature_ss
+        
+        # 纯误差 (中心点内部变异)
+        pure_error_ss = float(np.sum((y_center - center_mean) ** 2))
+        pure_error_df = n_center - 1
+        pure_error_ms = pure_error_ss / pure_error_df if pure_error_df > 0 else 0
+        
+        # 角点残差 (饱和设计时 = 0)
+        corner_resid_ss = float(model.ssr)
+        corner_resid_df = int(model.df_resid)
+        
+        # 误差 = 角点残差(失拟) + 纯误差
+        error_ss = corner_resid_ss + pure_error_ss
+        error_df = corner_resid_df + pure_error_df
+        error_ms = error_ss / error_df if error_df > 0 else 0
+        
+        # 弯曲 F 检验
+        curvature_f = curvature_ms / error_ms if error_ms > 0 else 0
+        curvature_p = float(1 - sp_stats.f.cdf(curvature_f, curvature_df, error_df)) if error_ms > 0 else 1.0
+        
+        # 失拟 F 检验
+        if corner_resid_df > 0 and pure_error_ms > 0:
+            lof_ms = corner_resid_ss / corner_resid_df
+            lof_f = lof_ms / pure_error_ms
+            lof_p = float(1 - sp_stats.f.cdf(lof_f, corner_resid_df, pure_error_df))
+        else:
+            lof_ms = 0
+            lof_f = None
+            lof_p = None
+        
+        # Ct Pt 系数
+        ct_pt_coeff = d
+        ct_pt_se = float(np.sqrt(error_ms * (1.0 / n_corner + 1.0 / n_center)))
+        ct_pt_t = ct_pt_coeff / ct_pt_se if ct_pt_se > 0 else 0
+        ct_pt_p = curvature_p
+        
+        # ── 模型摘要 ──
+        total_ss = float(np.sum((df_safe["Y"].values - np.mean(df_safe["Y"].values)) ** 2))
+        r_sq = 1 - error_ss / total_ss if total_ss > 0 else 0
+        r_sq_adj = 1 - (error_ms) / (total_ss / (n_total - 1)) if total_ss > 0 else 0
+        s = float(np.sqrt(error_ms)) if error_ms > 0 else 0
+        
+        # R-sq(pred)
+        try:
+            hat_corner = model.get_influence().hat_matrix_diag
+            resid_corner = model.resid.values
+            # 饱和设计时 hat=1, resid=0, PRESS=0/0 → 需要特殊处理
+            press_corner = 0
+            for i_c in range(len(resid_corner)):
+                denom = 1 - hat_corner[i_c]
+                if abs(denom) > 1e-10:
+                    press_corner += (resid_corner[i_c] / denom) ** 2
+                # 饱和时 denom≈0，该点 PRESS 贡献跳过
+        except Exception:
+            press_corner = 0
+        
+        press_center = 0
+        for i in range(n_center):
+            remaining = np.delete(y_center, i)
+            remaining_mean = float(np.mean(remaining))
+            d_loo = remaining_mean - corner_mean
+            pred_loo = corner_mean + d_loo
+            press_center += (y_center[i] - pred_loo) ** 2
+        
+        press_total = press_corner + press_center
+        r_sq_pred = 1 - press_total / total_ss if total_ss > 0 else 0
+        # 饱和设计时 R-sq(pred) 可能异常，Minitab 显示 *
+        r_sq_pred_display = round(r_sq_pred, 6) if abs(r_sq_pred) < 2.0 else None
+        
+        # ── 用合并 MSE 重新计算系数表 ──
+        X = model.model.exog
+        try:
+            XtX_inv = np.linalg.inv(X.T @ X)
+        except np.linalg.LinAlgError:
+            XtX_inv = np.linalg.pinv(X.T @ X)
+        
+        coefficients = []
+        params = model.params
+        for i, pname in enumerate(params.index):
+            coef = float(params.iloc[i])
+            se = float(np.sqrt(error_ms * XtX_inv[i, i]))
+            t_val = coef / se if se > 0 else 0
+            p_val = float(2 * (1 - sp_stats.t.cdf(abs(t_val), error_df)))
+            
+            display = pname
+            for safe, orig in reverse_names.items():
+                display = display.replace(safe, orig)
+            display = display.replace(":", "×")
+            
+            effect = round(2 * coef, 6) if pname != "Intercept" else None
+            
+            coefficients.append({
+                "term": display,
+                "effect": effect,
+                "coeff": round(coef, 6),
+                "se": round(se, 6),
+                "t_value": round(t_val, 4),
+                "p_value": round(p_val, 6),
+                "vif": 1.0 if pname != "Intercept" else None,
+            })
+        
+        # Ct Pt 行
+        coefficients.append({
+            "term": "Ct Pt",
+            "effect": None,
+            "coeff": round(ct_pt_coeff, 6),
+            "se": round(ct_pt_se, 6),
+            "t_value": round(ct_pt_t, 4),
+            "p_value": round(ct_pt_p, 6),
+            "vif": 1.0,
+        })
+        
+        # ── ANOVA 表 (Type III, 用合并 MSE) ──
+        try:
+            anova_t3 = anova_lm(model, typ=3)
+        except Exception:
+            # 饱和设计 Type III 可能失败，用 Type I 回退
+            anova_t3 = anova_lm(model, typ=1)
+        
+        linear_items = []
+        interact_2way = []
+        interact_3way = []
+        interact_higher = []
+        
+        for idx in anova_t3.index:
+            if idx in ("Intercept", "Residual"):
+                continue
+            ss = float(anova_t3.loc[idx, "sum_sq"])
+            df_ = int(anova_t3.loc[idx, "df"])
+            ms = ss / df_ if df_ > 0 else 0
+            f_val = ms / error_ms if error_ms > 0 else 0
+            p_val = float(1 - sp_stats.f.cdf(f_val, df_, error_df))
+            
+            display = idx
+            for safe, orig in reverse_names.items():
+                display = display.replace(safe, orig)
+            display = display.replace(":", "×")
+            
+            item = {"source": display, "df": df_, "ss": round(ss, 6), "ms": round(ms, 6),
+                    "f_value": round(f_val, 4), "p_value": round(p_val, 6)}
+            
+            colon_count = idx.count(":")
+            if colon_count == 0:
+                linear_items.append(item)
+            elif colon_count == 1:
+                interact_2way.append(item)
+            elif colon_count == 2:
+                interact_3way.append(item)
+            else:
+                interact_higher.append(item)
+        
+        # 构建完整 ANOVA 表
+        anova_rows = []
+        
+        # 模型行
+        all_effect_items = linear_items + interact_2way + interact_3way + interact_higher
+        model_effect_ss = sum(it["ss"] for it in all_effect_items) + curvature_ss
+        model_effect_df = sum(it["df"] for it in all_effect_items) + curvature_df
+        model_ms_ = model_effect_ss / model_effect_df if model_effect_df > 0 else 0
+        model_f_ = model_ms_ / error_ms if error_ms > 0 else 0
+        model_p_ = float(1 - sp_stats.f.cdf(model_f_, model_effect_df, error_df))
+        anova_rows.append({"source": "模型", "df": model_effect_df, "ss": round(model_effect_ss, 6),
+                           "ms": round(model_ms_, 6), "f_value": round(model_f_, 4), "p_value": round(model_p_, 6)})
+        
+        # 线性汇总
+        if linear_items:
+            lin_ss = sum(it["ss"] for it in linear_items)
+            lin_df = sum(it["df"] for it in linear_items)
+            lin_ms = lin_ss / lin_df if lin_df > 0 else 0
+            lin_f = lin_ms / error_ms if error_ms > 0 else 0
+            lin_p = float(1 - sp_stats.f.cdf(lin_f, lin_df, error_df))
+            anova_rows.append({"source": "  线性", "df": lin_df, "ss": round(lin_ss, 6),
+                               "ms": round(lin_ms, 6), "f_value": round(lin_f, 4), "p_value": round(lin_p, 6)})
+            for it in linear_items:
+                anova_rows.append({"source": "    " + it["source"], **{k_: it[k_] for k_ in ("df", "ss", "ms", "f_value", "p_value")}})
+        
+        # 2因子交互汇总
+        if interact_2way:
+            int2_ss = sum(it["ss"] for it in interact_2way)
+            int2_df = sum(it["df"] for it in interact_2way)
+            int2_ms = int2_ss / int2_df if int2_df > 0 else 0
+            int2_f = int2_ms / error_ms if error_ms > 0 else 0
+            int2_p = float(1 - sp_stats.f.cdf(int2_f, int2_df, error_df))
+            anova_rows.append({"source": "  2因子交互作用", "df": int2_df, "ss": round(int2_ss, 6),
+                               "ms": round(int2_ms, 6), "f_value": round(int2_f, 4), "p_value": round(int2_p, 6)})
+            for it in interact_2way:
+                anova_rows.append({"source": "    " + it["source"], **{k_: it[k_] for k_ in ("df", "ss", "ms", "f_value", "p_value")}})
+        
+        # 3因子交互汇总
+        if interact_3way:
+            int3_ss = sum(it["ss"] for it in interact_3way)
+            int3_df = sum(it["df"] for it in interact_3way)
+            int3_ms = int3_ss / int3_df if int3_df > 0 else 0
+            int3_f = int3_ms / error_ms if error_ms > 0 else 0
+            int3_p = float(1 - sp_stats.f.cdf(int3_f, int3_df, error_df))
+            anova_rows.append({"source": "  3因子交互作用", "df": int3_df, "ss": round(int3_ss, 6),
+                               "ms": round(int3_ms, 6), "f_value": round(int3_f, 4), "p_value": round(int3_p, 6)})
+            for it in interact_3way:
+                anova_rows.append({"source": "    " + it["source"], **{k_: it[k_] for k_ in ("df", "ss", "ms", "f_value", "p_value")}})
+        
+        # 更高阶交互
+        if interact_higher:
+            for it in interact_higher:
+                anova_rows.append({"source": "  " + it["source"], **{k_: it[k_] for k_ in ("df", "ss", "ms", "f_value", "p_value")}})
+        
+        # 弯曲行
+        anova_rows.append({"source": "  弯曲", "df": curvature_df, "ss": round(curvature_ss, 6),
+                           "ms": round(curvature_ms, 6), "f_value": round(curvature_f, 4), "p_value": round(curvature_p, 6)})
+        
+        # 误差行
+        anova_rows.append({"source": "误差", "df": error_df, "ss": round(error_ss, 6),
+                           "ms": round(error_ms, 6), "f_value": None, "p_value": None})
+        
+        # 失拟行 (仅当角点非饱和时有)
+        if corner_resid_df > 0:
+            anova_rows.append({"source": "  失拟", "df": corner_resid_df, "ss": round(corner_resid_ss, 6),
+                               "ms": round(lof_ms, 6),
+                               "f_value": round(lof_f, 4) if lof_f is not None else None,
+                               "p_value": round(lof_p, 6) if lof_p is not None else None})
+        
+        # 纯误差行
+        anova_rows.append({"source": "  纯误差", "df": pure_error_df, "ss": round(pure_error_ss, 6),
+                           "ms": round(pure_error_ms, 6), "f_value": None, "p_value": None})
+        
+        # 合计
+        anova_rows.append({"source": "合计", "df": n_total - 1, "ss": round(total_ss, 6),
+                           "ms": None, "f_value": None, "p_value": None})
+        
+        # ── 未编码系数和方程 ──
+        uncoded_coefficients = []
+        uncoded_equation = ""
+        uncoded_equations = None
+        try:
+            df_orig = pd.DataFrame()
+            for orig_name in self._factor_names:
+                if orig_name in self._categorical_factors:
+                    df_orig[orig_name] = self._df[orig_name].astype(str)
+                else:
+                    df_orig[orig_name] = self._df[orig_name].astype(float)
+            df_orig["Y"] = self._df[self._response_name].values
+            
+            # 仅用角点
+            df_orig_corner = df_orig.iloc[df_safe[~center_mask].index].reset_index(drop=True)
+            
+            orig_cont = [f for f in self._factor_names if f not in self._categorical_factors]
+            orig_cat = [f for f in self._factor_names if f in self._categorical_factors]
+            
+            uncoded_terms = list(orig_cont)
+            for v in orig_cat:
+                uncoded_terms.append(f"C({v})")
+            for order in range(2, len(self._factor_names) + 1):
+                for combo in combinations(range(len(self._factor_names)), order):
+                    parts = []
+                    for ci in combo:
+                        fn = self._factor_names[ci]
+                        parts.append(f"C({fn})" if fn in self._categorical_factors else fn)
+                    uncoded_terms.append(":".join(parts))
+            
+            uncoded_formula = "Y ~ " + " + ".join(uncoded_terms)
+            model_uncoded = ols(uncoded_formula, data=df_orig_corner).fit()
+            
+            for idx_j, term in enumerate(model_uncoded.params.index):
+                coeff_val = float(model_uncoded.params[term])
+                # 用合并 MSE 近似 (精确方法需要 uncoded XtX_inv × error_ms)
+                se_val = float(model_uncoded.bse[term]) if model_uncoded.df_resid > 0 else 0
+                t_val = float(model_uncoded.tvalues[term]) if model_uncoded.df_resid > 0 else 0
+                p_val = float(model_uncoded.pvalues[term]) if model_uncoded.df_resid > 0 else 1.0
+                display_term = self._restore_term_name(term, reverse_names) if hasattr(self, '_restore_term_name') else term
+                uncoded_coefficients.append({
+                    "term": display_term,
+                    "coeff": round(coeff_val, 6),
+                    "se": round(se_val, 6),
+                    "t_value": round(t_val, 4),
+                    "p_value": round(p_val, 6),
+                    "vif": None
+                })
+            
+            uncoded_equation = self._build_equation(model_uncoded, reverse_names) if hasattr(self, '_build_equation') else ""
+            # ★ v17: 未编码方程也追加 Ct Pt 项
+            if ct_pt_coeff != 0:
+                sign = " + " if ct_pt_coeff > 0 else " - "
+                uncoded_equation += f"{sign}{abs(ct_pt_coeff):.4f}×Ct Pt"
+        except Exception:
+            pass
+        
+        # ── CI 导出参数 ──
+        ci_export = {}
+        try:
+            n_obs_corner = X.shape[0]
+            p_params = X.shape[1]
+            sigma_val = round(s, 8)
+            t_crit_val = round(float(sp_stats.t.ppf(0.975, error_df)), 6)
+            ci_export = {
+                "xtx_inv_flat": [round(v, 10) for v in XtX_inv.flatten().tolist()],
+                "sigma": sigma_val,
+                "t_crit": t_crit_val,
+                "param_count": p_params
+            }
+        except Exception:
+            ci_export = {"xtx_inv_flat": [], "sigma": 0.0, "t_crit": 0.0, "param_count": 0}
+        
+        # ── 模型摘要 ──
+        model_p_overall = round(model_p_, 6)
+        equation = self._build_equation(model, reverse_names) if hasattr(self, '_build_equation') else ""
+        equations = self._build_equations_by_category(model, reverse_names) if hasattr(self, '_build_equations_by_category') else None
+        
+        # ★ v17: 在方程末尾追加 Ct Pt 项
+        if ct_pt_coeff != 0:
+            sign = " + " if ct_pt_coeff > 0 else " - "
+            equation += f"{sign}{abs(ct_pt_coeff):.4f}×Ct Pt"
+        
+        # Adequate Precision
+        adeq_prec = 0.0
+        try:
+            fitted_arr = model.fittedvalues.values
+            y_range = float(fitted_arr.max() - fitted_arr.min())
+            mean_var_pred = error_ms * len(model.params) / n_corner
+            if mean_var_pred > 0:
+                adeq_prec = float(y_range / np.sqrt(mean_var_pred))
+        except Exception:
+            pass
+        
+        model_summary = {
+            "r_squared": round(r_sq, 6),
+            "r_squared_adj": round(r_sq_adj, 6),
+            "r_squared_pred": r_sq_pred_display,
+            "rmse": round(s, 6),
+            "adeq_precision": round(adeq_prec, 4),
+            "press": round(press_total, 4),
+            "lack_of_fit_p": round(lof_p, 6) if lof_p is not None else None,
+            "model_p": model_p_overall,
+            "equation": equation,
+            "equations": equations,
+            "mse": round(error_ms, 6),  # ★ v17: 供 Pareto 使用
+            "df_error": error_df,  # ★ v17: 供 Pareto 使用
+        }
+        
+        return {
+            "model": model,
+            "anova_table": anova_rows,
+            "coefficients": coefficients,
+            "uncoded_coefficients": uncoded_coefficients,
+            "model_summary": model_summary,
+            "curvature": {
+                "has_curvature_test": True,
+                "n_corner": n_corner,
+                "n_center": n_center,
+                "corner_mean": round(corner_mean, 6),
+                "center_mean": round(center_mean, 6),
+                "ct_pt_coeff": round(ct_pt_coeff, 6),
+                "ct_pt_se": round(ct_pt_se, 6),
+                "ct_pt_t": round(ct_pt_t, 4),
+                "ct_pt_p": round(ct_pt_p, 6),
+                "curvature_ss": round(curvature_ss, 6),
+                "curvature_df": curvature_df,
+                "curvature_f": round(curvature_f, 4),
+                "curvature_p": round(curvature_p, 6),
+            },
+            "uncoded_equation": uncoded_equation,
+            "uncoded_equations": uncoded_equations,
+            "xtx_inv_flat": ci_export.get("xtx_inv_flat", []),
+            "sigma": ci_export.get("sigma", 0.0),
+            "t_crit": ci_export.get("t_crit", 0.0),
+            "param_count": ci_export.get("param_count", 0),
+        }
+
+    # ═══════════════════════════════════════════════════════
     # ★ v7 新增: 不可估计项检测核心方法
     # ═══════════════════════════════════════════════════════
 
@@ -2209,6 +2747,84 @@ class DOEAnalyzer:
         
         try:
             from scipy import stats as sp_stats
+            
+            # ★ v17: 弯曲检验模式 — 角点饱和模型残差=0，需要用全部数据重新计算
+            is_curvature_mode = (hasattr(self, '_curvature_mse') and self._curvature_mse is not None)
+            
+            if is_curvature_mode:
+                # 用全部数据（角点+中心点）计算残差
+                # 角点: 拟合值 = 模型预测（精确），残差 = 0
+                # 中心点: 拟合值 = corner_mean + Ct Pt coeff
+                model = self._model
+                mse = self._curvature_mse
+                s = np.sqrt(mse)
+                
+                # 获取全部实际值
+                all_y = self._df[self._response_name].values
+                n_total = len(all_y)
+                
+                # 检测中心点
+                safe_continuous = [f"X{i}" for i, f in enumerate(self._factor_names) if f not in self._categorical_factors]
+                df_safe = pd.DataFrame()
+                for i, f in enumerate(self._factor_names):
+                    safe = f"X{i}"
+                    if f in self._categorical_factors:
+                        df_safe[safe] = self._df[f].astype(str)
+                    else:
+                        info = self._coding_info.get(f, {})
+                        center = info.get("center", 0)
+                        half_range = info.get("half_range", 1)
+                        df_safe[safe] = (self._df[f].astype(float) - center) / half_range
+                
+                center_mask = self._detect_center_points(df_safe, safe_continuous)
+                corner_idx = np.where(~center_mask)[0]
+                center_idx = np.where(center_mask)[0]
+                
+                # 角点拟合值 = 模型精确预测
+                fitted_all = np.zeros(n_total)
+                fitted_all[corner_idx] = model.fittedvalues.values
+                
+                # 中心点拟合值 = center_mean（Minitab 做法）
+                center_mean = float(np.mean(all_y[center_idx]))
+                fitted_all[center_idx] = center_mean
+                
+                residuals = all_y - fitted_all
+                n = n_total
+                
+                # Minitab 残差图用非标准化残差（raw residuals）
+                # 因为角点残差=0，标准化没有意义
+                raw_resid = residuals
+                
+                # 1. 正态概率图
+                sorted_resid = np.sort(raw_resid)
+                theoretical = sp_stats.norm.ppf((np.arange(1, n + 1) - 0.375) / (n + 0.25))
+                
+                # 4. 残差直方图
+                n_bins = max(5, int(np.sqrt(n)))
+                hist_freq, hist_edges = np.histogram(raw_resid, bins=n_bins)
+                
+                return json.dumps({
+                    "normal_probability": {
+                        "theoretical_quantiles": [round(float(v), 4) for v in theoretical],
+                        "ordered_residuals": [round(float(v), 4) for v in sorted_resid]
+                    },
+                    "residuals_vs_fitted": {
+                        "fitted": [round(float(v), 4) for v in fitted_all],
+                        "residuals": [round(float(v), 4) for v in raw_resid]
+                    },
+                    "residuals_vs_order": {
+                        "order": list(range(1, n + 1)),
+                        "residuals": [round(float(v), 4) for v in raw_resid]
+                    },
+                    "residuals_histogram": {
+                        "bin_edges": [round(float(v), 4) for v in hist_edges],
+                        "frequencies": [int(v) for v in hist_freq]
+                    },
+                    "cooks_distance": {
+                        "observation": list(range(1, n + 1)),
+                        "distance": [0.0] * n
+                    }
+                }, ensure_ascii=False)
             
             model = self._model
             residuals = model.resid.values
@@ -2267,13 +2883,10 @@ class DOEAnalyzer:
 
     def effects_pareto(self, alpha: float = 0.05) -> str:
         """
-        ★ v13: Minitab 风格 Pareto 图 — 按因子分组，类别因子用 GLH 联合 F 检验
+        ★ v13/v17: Minitab 风格 Pareto 图
         
-        Minitab 的 Pareto 图特点:
-        1. 每个因子只显示一个条形（不展开哑变量）
-        2. 连续因子 df=1: 直接用 t 值
-        3. 类别因子/类别交互 df>1: 用 GLH 联合 F 检验, t = √F
-        4. 使用 Sum coding + 编码值模型（与 ANOVA 一致）
+        v17 改进: 全因子弯曲检验时，使用合并 MSE 计算标准化效应 |t|
+        Minitab Pareto 图: 横轴 = |t|, 参考线 = t(1-α/2, df_error)
         """
         if self._model is None:
             return json.dumps([], ensure_ascii=False)
@@ -2289,7 +2902,66 @@ class DOEAnalyzer:
             safe_continuous = [safe_names[f] for f in self._continuous_factors]
             safe_categorical = [safe_names[f] for f in self._categorical_factors]
             
-            # ★ 使用 Sum coding 模型（与 ANOVA _build_anova_table 一致）
+            # ★ v17: 检查是否走了弯曲检验路径
+            # 弯曲检验时 self._model 是角点饱和模型 (df_resid=0)
+            # 需要用合并 MSE 重新计算 T 值
+            is_curvature_mode = (hasattr(self, '_curvature_mse') and self._curvature_mse is not None)
+            
+            if is_curvature_mode:
+                # ★ v17: 弯曲检验路径 — 直接从角点模型 + 合并 MSE 计算
+                mse = self._curvature_mse
+                df_error = self._curvature_df_error
+                
+                X = model.model.exog
+                try:
+                    XtX_inv = np.linalg.inv(X.T @ X)
+                except np.linalg.LinAlgError:
+                    XtX_inv = np.linalg.pinv(X.T @ X)
+                
+                params_list = list(model.params.index)
+                effects = []
+                
+                for i, pname in enumerate(params_list):
+                    if pname == "Intercept":
+                        continue
+                    coef = float(model.params.iloc[i])
+                    se = float(np.sqrt(mse * XtX_inv[i, i]))
+                    t_val = coef / se if se > 0 else 0
+                    p_val = float(2 * (1 - sp_stats.t.cdf(abs(t_val), df_error)))
+                    
+                    # 还原显示名
+                    display = pname
+                    for safe, orig in reverse_names.items():
+                        display = display.replace(safe, orig)
+                    display = display.replace(":", "×")
+                    
+                    effects.append({
+                        "term": display,
+                        "t_value": round(abs(t_val), 4),
+                        "abs_t": round(abs(t_val), 4),
+                        "p_value": round(p_val, 6),
+                        "significant": p_val < alpha,
+                        "df": 1,
+                        "log_worth": round(float(-np.log10(max(p_val, 1e-20))), 4),
+                    })
+                
+                effects.sort(key=lambda x: x["abs_t"], reverse=True)
+                
+                t_crit = float(sp_stats.t.ppf(1 - alpha / 2, df_error))
+                m = len(effects)
+                for eff in effects:
+                    eff["bonferroni_significant"] = eff["p_value"] < alpha / m if m > 0 else False
+                
+                return json.dumps({
+                    "effects": effects,
+                    "t_crit": round(t_crit, 4),
+                    "log_worth_crit": round(t_crit, 4),  # Minitab Pareto 参考线 = t 临界值
+                    "alpha": alpha,
+                    "df_error": df_error,
+                    "measure": "StandardizedEffect"  # Minitab 标准化效应
+                }, ensure_ascii=False)
+            
+            # ── 非弯曲检验路径: 原有逻辑 ──
             df_safe = pd.DataFrame()
             for orig_name, safe_name in safe_names.items():
                 if orig_name in self._categorical_factors:
@@ -2323,21 +2995,16 @@ class DOEAnalyzer:
                 if p_name == "Intercept":
                     continue
                 
-                # 清理 Sum coding 标记
                 p_clean = p_name.replace(", Sum", "")
                 
-                # 判断属于哪个"因子项"
                 if "**" in p_clean:
-                    # 二次项: I(X0 ** 2) → X0²
                     match = re.search(r'I\((\w+)\s*\*\*\s*2\)', p_clean)
                     if match:
                         base_var = match.group(1)
                         display = self._restore_term_name(base_var, reverse_names) + "²"
                         factor_groups.setdefault(display, []).append(p_name)
                 elif ":" in p_clean:
-                    # 交互项: 提取两个因子名
                     parts = p_clean.split(":")
-                    # 每个 part 可能是 C(X3)[S.A] 或 X0
                     factor_names_in_term = []
                     for part in parts:
                         m = re.match(r'C\((\w+)', part)
@@ -2345,14 +3012,12 @@ class DOEAnalyzer:
                             factor_names_in_term.append(m.group(1))
                         else:
                             factor_names_in_term.append(part.strip())
-                    # 还原为显示名
                     display_parts = []
                     for fn in factor_names_in_term:
                         display_parts.append(reverse_names.get(fn, fn))
                     display = "×".join(sorted(set(display_parts)))
                     factor_groups.setdefault(display, []).append(p_name)
                 else:
-                    # 主效应: X0 或 C(X3)[S.A]
                     m = re.match(r'C\((\w+)', p_clean)
                     if m:
                         base_var = m.group(1)
@@ -2374,8 +3039,6 @@ class DOEAnalyzer:
                     f_val = float(f_result.fvalue)
                     p_val = float(f_result.pvalue)
                     t_equiv = float(np.sqrt(f_val))
-                    # ★ v13: LogWorth = -log10(p), 对标 JMP Effect Screening
-                    # 用 LogWorth 排序对 df>1 的类别因子更公平
                     log_worth = float(-np.log10(max(p_val, 1e-20)))
                 except Exception:
                     t_equiv = 0.0
@@ -2385,30 +3048,24 @@ class DOEAnalyzer:
                 effects.append({
                     "term": display_name,
                     "t_value": round(t_equiv, 4),
-                    "abs_t": round(log_worth, 4),  # ★ Pareto 条形值用 LogWorth
+                    "abs_t": round(log_worth, 4),
                     "p_value": round(p_val, 6),
                     "significant": p_val < alpha,
                     "df": df_group,
                     "log_worth": round(log_worth, 4)
                 })
             
-            # ★ 按 LogWorth 降序排列 (= 按 p 值升序, 跟 JMP/Minitab 排序一致)
             effects.sort(key=lambda x: x["abs_t"], reverse=True)
             
-            # 参考线: LogWorth 动态阈值（对齐 JMP/Minitab）
-            # 公式: -log10(2*(1-Φ(t(1-α/2, df_error))))
-            # 先用 t 分布算临界值，再用正态分布转成 LogWorth
             m = len(effects)
             df_error = int(model_sum.df_resid)
-            from scipy import stats as _sp_stats
-            t_crit = float(_sp_stats.t.ppf(1 - alpha / 2, df_error))
-            p_norm_at_tcrit = 2 * (1 - _sp_stats.norm.cdf(t_crit))
+            t_crit = float(sp_stats.t.ppf(1 - alpha / 2, df_error))
+            p_norm_at_tcrit = 2 * (1 - sp_stats.norm.cdf(t_crit))
             log_worth_crit = float(-np.log10(p_norm_at_tcrit))
             if m > 0 and df_error > 0:
                 for eff in effects:
                     eff["bonferroni_significant"] = eff["p_value"] < alpha / m
             
-            # ★ v13: 返回对象而非数组，包含参考线元数据
             return json.dumps({
                 "effects": effects,
                 "log_worth_crit": round(log_worth_crit, 4),

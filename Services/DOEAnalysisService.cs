@@ -13,6 +13,7 @@ namespace MaxChemical.Modules.DOE.Services
     /// <summary>
     /// DOE 数据分析服务
     /// ★ v14: 所有 OLS 方法不再写死 quadratic，改为 _lastModelType 动态路由
+    /// ★ v17: 支持全因子弯曲检验 (Curvature Test) 结果解析
     /// </summary>
     public class DOEAnalysisService : IDOEAnalysisService
     {
@@ -47,11 +48,19 @@ namespace MaxChemical.Modules.DOE.Services
                 using (Py.GIL())
                 {
                     dynamic doeEngine = Py.Import("doe_engine");
+
+                    // ★ 调试：打印实际加载的文件路径
+                    _logger.LogInformation("★ doe_engine.__file__ = {Path}", doeEngine.__file__.ToString());
+
+                    // ★ 强制 reload
+                    dynamic importlib = Py.Import("importlib");
+                    doeEngine = importlib.reload(doeEngine);
+                    _logger.LogInformation("★ reload 后 doe_engine.__file__ = {Path}", doeEngine.__file__.ToString());
+
                     _analyzer = doeEngine.create_analyzer();
                     _plotter = doeEngine.create_surface_plotter();
                 }
                 _isPythonInitialized = true;
-                _logger.LogInformation("DOE 分析服务初始化成功");
             }
             catch (Exception ex)
             {
@@ -135,10 +144,10 @@ namespace MaxChemical.Modules.DOE.Services
             factorTypesDict["__design_meta__"] = designMeta;
 
             var factorTypesJson = JsonConvert.SerializeObject(factorTypesDict);
-
             using (Py.GIL())
             {
                 _analyzer!.load_data(factorsJson, responsesJson, primaryResponse, factorTypesJson);
+
             }
         }
 
@@ -188,7 +197,8 @@ namespace MaxChemical.Modules.DOE.Services
                     StdError = c.SE,
                     TValue = c.TValue,
                     PValue = c.PValue,
-                    VIF = c.VIF
+                    VIF = c.VIF,
+                    Effect = c.Effect   // ★ v17 新增
                 }).ToList();
             }
 
@@ -235,6 +245,9 @@ namespace MaxChemical.Modules.DOE.Services
             result.TCrit = pyResult.TCrit;
             result.ParamCount = pyResult.ParamCount;
 
+            // ★ v17: 解析弯曲检验结果（全因子设计 + 中心点时有值）
+            result.CurvatureTest = pyResult.CurvatureTest;
+
             return result;
         }
 
@@ -254,6 +267,7 @@ namespace MaxChemical.Modules.DOE.Services
             using (Py.GIL())
             {
                 string resultJson = _analyzer!.fit_ols(modelType).ToString();
+
                 var pyResult = JsonConvert.DeserializeObject<PythonOLSResult>(resultJson);
 
                 if (pyResult == null || pyResult.Error != null)
@@ -270,6 +284,11 @@ namespace MaxChemical.Modules.DOE.Services
 
                 if (result.DroppedTerms.Count > 0)
                     _logger.LogWarning("FitOLS 自动剔除不可估计项: {Terms}", string.Join(", ", result.DroppedTerms));
+
+                // ★ v17: 弯曲检验日志
+                if (result.CurvatureTest?.HasCurvatureTest == true)
+                    _logger.LogInformation("FitOLS 弯曲检验: P={CurvP}, 显著={IsSig}",
+                        result.CurvatureTest.CurvatureP, result.CurvatureTest.IsSignificant);
 
                 _logger.LogInformation("FitOLS 完成: R²={R2}, R²adj={R2adj}, Dropped={Dropped}",
                     result.ModelSummary.RSquared, result.ModelSummary.RSquaredAdj, result.DroppedTerms.Count);
@@ -320,7 +339,11 @@ namespace MaxChemical.Modules.DOE.Services
         {
             EnsureReady();
             await LoadBatchDataAsync(batchId, responseName);
-            using (Py.GIL()) { return _analyzer!.residual_diagnostics().ToString(); }
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols(_lastModelType);  // ★ v17
+                return _analyzer!.residual_diagnostics().ToString();
+            }
         }
 
         // ═══════════════════════════════════════════════════════
@@ -331,7 +354,11 @@ namespace MaxChemical.Modules.DOE.Services
         {
             EnsureReady();
             await LoadBatchDataAsync(batchId, responseName);
-            using (Py.GIL()) { return _analyzer!.effects_pareto(alpha).ToString(); }
+            using (Py.GIL())
+            {
+                _analyzer!.fit_ols(_lastModelType);  // ★ v17: 确保弯曲检验路径被触发
+                return _analyzer!.effects_pareto(alpha).ToString();
+            }
         }
 
         // ═══════════════════════════════════════════════════════
@@ -405,7 +432,19 @@ namespace MaxChemical.Modules.DOE.Services
                 return _analyzer!.contour_data_ols(factor1, factor2, gridSize, boundsJson).ToString();
             }
         }
+        /// <summary>★ v17: 直接获取 Pareto（不重新 load_data / fit_ols，用当前已拟合的模型）</summary>
+        public string GetEffectsParetoFromCurrentModel(double alpha = 0.05)
+        {
+            EnsureReady();
+            using (Py.GIL()) { return _analyzer!.effects_pareto(alpha).ToString(); }
+        }
 
+        /// <summary>★ v17: 直接获取残差（不重新 load_data / fit_ols，用当前已拟合的模型）</summary>
+        public string GetResidualDiagnosticsFromCurrentModel()
+        {
+            EnsureReady();
+            using (Py.GIL()) { return _analyzer!.residual_diagnostics().ToString(); }
+        }
         // ═══════════════════════════════════════════════════════
         // 异常点分析 + 排除重拟合
         // ═══════════════════════════════════════════════════════
@@ -856,6 +895,9 @@ namespace MaxChemical.Modules.DOE.Services
             [JsonProperty("sigma")] public double Sigma { get; set; }
             [JsonProperty("t_crit")] public double TCrit { get; set; }
             [JsonProperty("param_count")] public int ParamCount { get; set; }
+
+            // ★ v17: 弯曲检验结果（全因子设计 + 中心点时有值）
+            [JsonProperty("curvature_test")] public CurvatureTestResult? CurvatureTest { get; set; }
         }
 
         private class PyAnovaRow
@@ -876,6 +918,8 @@ namespace MaxChemical.Modules.DOE.Services
             [JsonProperty("t_value")] public double TValue { get; set; }
             [JsonProperty("p_value")] public double PValue { get; set; }
             [JsonProperty("vif")] public double? VIF { get; set; }
+            // ★ v17 新增:
+            [JsonProperty("effect")] public double? Effect { get; set; }
         }
 
         private class PyUncodedCoeffRow

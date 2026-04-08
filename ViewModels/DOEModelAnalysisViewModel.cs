@@ -379,6 +379,30 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 }
             }
         }
+        private bool _hasCurvatureTest;
+        /// <summary>
+        /// ★ v17: 是否有弯曲检验结果（全因子+中心点时为 true）
+        /// 用于控制系数表"效应"列的显隐
+        /// </summary>
+        public bool HasCurvatureTest
+        {
+            get => _hasCurvatureTest;
+            set => SetProperty(ref _hasCurvatureTest, value);
+        }
+
+        // ★ v17: 弯曲提示文本
+        private string _curvatureHint = "";
+        public string CurvatureHint
+        {
+            get => _curvatureHint;
+            set => SetProperty(ref _curvatureHint, value);
+        }
+        private string _paretoSubtitle = "Pareto of LogWorth = −log₁₀(p-value). Click bars to toggle include/exclude.";
+        public string ParetoSubtitle
+        {
+            get => _paretoSubtitle;
+            set => SetProperty(ref _paretoSubtitle, value);
+        }
         public string EquationModeText => IsCodedEquation ? "编码单位" : "未编码单位";
         public string BoxCoxRecommendation { get => _boxCoxRecommendation; set => SetProperty(ref _boxCoxRecommendation, value); }
         public bool HasBoxCoxResult { get => _hasBoxCoxResult; set => SetProperty(ref _hasBoxCoxResult, value); }
@@ -1170,7 +1194,11 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 }
                 catch { /* JSON 解析失败用默认值 */ }
             }
-
+            // ★ v17: 全因子设计自动使用 interaction 模型（触发弯曲检验）
+            if (_currentOlsModelType == "quadratic" && batch?.DesignMethod == DOEDesignMethod.FullFactorial)
+            {
+                _currentOlsModelType = "interaction";
+            }
             await RefreshOlsAnalysisAsync();
         }
 
@@ -1314,12 +1342,22 @@ namespace MaxChemical.Modules.DOE.ViewModels
         {
             if (result == null) return;
 
+            // ★ v17: 更新弯曲检验状态
+            HasCurvatureTest = result.CurvatureTest?.HasCurvatureTest == true;
+            if (HasCurvatureTest)
+            {
+                var ct = result.CurvatureTest!;
+                CurvatureHint = ct.IsSignificant
+                    ? $"⚠️ 弯曲显著 (P={ct.CurvatureP:F3})，建议进行 RSM 二阶分析 (CCD/BBD)"
+                    : $"✓ 弯曲不显著 (P={ct.CurvatureP:F3})，一阶模型适用";
+            }
+            else
+            {
+                CurvatureHint = "";
+            }
+
             if (IsCodedEquation)
             {
-                // 编码模式: 显示编码系数（Sum coding，VIF 正常）
-                // OlsResult.Coefficients 已经绑定到 DataGrid，直接用
-                // 如果你的 DataGrid 绑定的是 OlsResult.Coefficients，
-                // 则需要一个中间属性来切换
                 DisplayCoefficients = result.Coefficients?
                     .Select(c => new CoefficientDisplayRow
                     {
@@ -1328,12 +1366,12 @@ namespace MaxChemical.Modules.DOE.ViewModels
                         StdError = c.StdError,
                         TValue = c.TValue,
                         PValue = c.PValue,
-                        VIF = c.VIF
+                        VIF = c.VIF,
+                        Effect = c.Effect   // ★ v17 新增
                     }).ToList() ?? new();
             }
             else
             {
-                // 未编码模式: 显示原始值系数（VIF 会很大，这是正常的）
                 DisplayCoefficients = result.UncodedCoefficients?
                     .Select(c => new CoefficientDisplayRow
                     {
@@ -1342,10 +1380,12 @@ namespace MaxChemical.Modules.DOE.ViewModels
                         StdError = c.StdError,
                         TValue = c.TValue,
                         PValue = c.PValue,
-                        VIF = c.VIF
+                        VIF = c.VIF,
+                        Effect = null  // ★ v17: 未编码模式不显示效应
                     }).ToList() ?? new();
             }
         }
+
         // ═══ Pareto 图构建（支持点击切换） ═══
 
         private async Task LoadOlsParetoAsync()
@@ -1356,8 +1396,21 @@ namespace MaxChemical.Modules.DOE.ViewModels
                     SelectedOlsBatch!.BatchId, _selectedResponseName);
                 var wrapper = JsonConvert.DeserializeObject<ParetoResult>(json);
                 var data = wrapper?.Effects;
-                _paretoLogWorthCrit = wrapper?.LogWorthCrit ?? 1.301;
                 _paretoAlpha = wrapper?.Alpha ?? 0.05;
+
+                // ★ v17: 根据 measure 切换 Pareto 模式
+                var measure = wrapper?.Measure ?? "LogWorth";
+                if (measure == "StandardizedEffect")
+                {
+                    _paretoLogWorthCrit = wrapper?.TCrit ?? wrapper?.LogWorthCrit ?? 4.3;
+                    ParetoSubtitle = $"标准化效应的 Pareto 图 (响应为 产率, α = {_paretoAlpha:F2})";
+                }
+                else
+                {
+                    _paretoLogWorthCrit = wrapper?.LogWorthCrit ?? 1.301;
+                    ParetoSubtitle = "Pareto of LogWorth = −log₁₀(p-value). Click bars to toggle include/exclude.";
+                }
+
                 if (data == null || data.Count == 0) return;
 
                 // 保存项数据（用于点击交互）
@@ -1526,18 +1579,20 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 .Where(t => t.IsIncluded)
                 .Select(t => t.TermName)
                 .ToList();
+            var excludedTerms = _paretoTerms
+                .Where(t => !t.IsIncluded)
+                .Select(t => t.TermName)
+                .ToHashSet();
 
             if (selectedTerms.Count == 0)
             {
                 _dialogService.ShowError("至少需要保留一个模型项", "提示");
                 return;
             }
-
             try
             {
                 IsLoading = true;
                 OlsStatusText = "正在拟合精简模型...";
-
                 OlsResult = await _analysisService.FitOlsCustomAsync(
                     SelectedOlsBatch!.BatchId, _selectedResponseName, selectedTerms);
 
@@ -1545,32 +1600,154 @@ namespace MaxChemical.Modules.DOE.ViewModels
                 {
                     OlsStatusText = $"精简模型: R²={OlsResult.ModelSummary.RSquared:F4}, R²adj={OlsResult.ModelSummary.RSquaredAdj:F4}, R²pred={OlsResult.ModelSummary.RSquaredPred:F4}";
                     UpdateEquationsDisplay(OlsResult);
+                    UpdateCoefficientTableDisplay(OlsResult);
+                    RaisePropertyChanged(nameof(OlsResult));
 
-                    if (OlsResult.Coefficients != null)
+                    // ★ v17: 从当前已拟合的精简模型直接获取 Pareto（不重新 load_data）
+                    var paretoJson = await Task.Run(() =>
+                        _analysisService.GetEffectsParetoFromCurrentModel());
+                    var wrapper = JsonConvert.DeserializeObject<ParetoResult>(paretoJson);
+                    if (wrapper?.Effects != null)
                     {
-                        foreach (var term in _paretoTerms.Where(t => t.IsIncluded))
+                        _paretoTerms.Clear();
+                        foreach (var d in wrapper.Effects)
                         {
-                            var newCoeff = OlsResult.Coefficients
-                                .FirstOrDefault(c => c.Term == term.TermName);
-                            if (newCoeff != null)
+                            _paretoTerms.Add(new ParetoTermItem
                             {
-                                term.AbsT = Math.Abs(newCoeff.TValue);
-                                term.PValue = newCoeff.PValue;
-                                term.IsSignificant = newCoeff.PValue < 0.05;
+                                TermName = d.Term,
+                                AbsT = d.AbsT,
+                                PValue = d.PValue,
+                                IsSignificant = d.Significant,
+                                IsIncluded = true
+                            });
+                        }
+
+                        // 把之前排除的项加回（灰色，值=0）
+                        foreach (var exTerm in excludedTerms)
+                        {
+                            if (!_paretoTerms.Any(t => t.TermName == exTerm))
+                            {
+                                _paretoTerms.Add(new ParetoTermItem
+                                {
+                                    TermName = exTerm,
+                                    AbsT = 0,
+                                    PValue = 1.0,
+                                    IsSignificant = false,
+                                    IsIncluded = false
+                                });
                             }
+                        }
+
+                        // ★ v17: 弯曲模式 Pareto 参考线
+                        var measure = wrapper.Measure ?? "LogWorth";
+                        if (measure == "StandardizedEffect")
+                        {
+                            _paretoLogWorthCrit = wrapper.TCrit.HasValue ? wrapper.TCrit.Value : wrapper.LogWorthCrit;
+                            ParetoSubtitle = $"标准化效应的 Pareto 图 (响应为 {_selectedResponseName}, α = {_paretoAlpha:F2})";
                         }
                     }
                     RebuildParetoPlot();
                     UpdateTermsText();
 
-                    // 更新残差四合一
-                    await LoadResidualDiagnosticsAsync();
+                    // ★ v17: 从当前已拟合的精简模型直接获取残差（不重新 load_data）
+                    var residJson = await Task.Run(() =>
+                        _analysisService.GetResidualDiagnosticsFromCurrentModel());
+                    var diag = JsonConvert.DeserializeObject<ResidualDiagnostics>(residJson);
+                    if (diag != null) BuildResidualPlotsFromData(diag);
                 }
             }
             catch (Exception ex) { _logger.LogError(ex, "精简模型失败"); OlsStatusText = $"精简模型失败: {ex.Message}"; }
             finally { IsLoading = false; }
         }
+        /// <summary>★ v17: 从已有的残差数据构建四合一图（精简模型刷新用）</summary>
+        private void BuildResidualPlotsFromData(ResidualDiagnostics diag)
+        {
+            // (1) Normal Q-Q
+            var npModel = new PlotModel();
+            npModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Theoretical quantile" });
+            npModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Std residual" });
+            var npScatter = JmpScatter(0, 3);
+            for (int i = 0; i < diag.NormalProbability.TheoreticalQuantiles.Count; i++)
+                npScatter.Points.Add(new ScatterPoint(
+                    diag.NormalProbability.TheoreticalQuantiles[i],
+                    diag.NormalProbability.OrderedResiduals[i]));
+            npModel.Series.Add(npScatter);
+            if (diag.NormalProbability.TheoreticalQuantiles.Count > 0)
+            {
+                double min = diag.NormalProbability.TheoreticalQuantiles.Min();
+                double max = diag.NormalProbability.TheoreticalQuantiles.Max();
+                var refLine = JmpRefLine();
+                refLine.Points.Add(new DataPoint(min, min));
+                refLine.Points.Add(new DataPoint(max, max));
+                npModel.Series.Add(refLine);
+            }
+            ApplyJmpStyle(npModel);
+            NormalProbPlot = npModel;
 
+            // (2) Residual vs Fitted
+            var rvfModel = new PlotModel();
+            rvfModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Fitted" });
+            rvfModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Std residual" });
+            var rvfScatter = JmpScatter(1, 3);
+            for (int i = 0; i < diag.ResidualsVsFitted.Fitted.Count; i++)
+                rvfScatter.Points.Add(new ScatterPoint(
+                    diag.ResidualsVsFitted.Fitted[i], diag.ResidualsVsFitted.Residuals[i]));
+            rvfModel.Series.Add(rvfScatter);
+            if (diag.ResidualsVsFitted.Fitted.Count > 0)
+            {
+                var zeroLine = JmpRefLine();
+                zeroLine.Points.Add(new DataPoint(diag.ResidualsVsFitted.Fitted.Min(), 0));
+                zeroLine.Points.Add(new DataPoint(diag.ResidualsVsFitted.Fitted.Max(), 0));
+                rvfModel.Series.Add(zeroLine);
+            }
+            ApplyJmpStyle(rvfModel);
+            ResidVsFittedPlot = rvfModel;
+
+            // (3) Histogram
+            var histModel = new PlotModel();
+            histModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Std residual" });
+            histModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Frequency", Minimum = 0 });
+            var histSeries = new RectangleBarSeries { StrokeThickness = 0.5, StrokeColor = OxyColor.FromRgb(200, 200, 200) };
+            for (int i = 0; i < diag.ResidualsHistogram.Frequencies.Count; i++)
+            {
+                histSeries.Items.Add(new RectangleBarItem
+                {
+                    X0 = diag.ResidualsHistogram.BinEdges[i],
+                    X1 = diag.ResidualsHistogram.BinEdges[i + 1],
+                    Y0 = 0,
+                    Y1 = diag.ResidualsHistogram.Frequencies[i],
+                    Color = OxyColor.FromArgb(180, 0x4A, 0x7F, 0xC4)
+                });
+            }
+            histModel.Series.Add(histSeries);
+            ApplyJmpStyle(histModel);
+            ResidHistogramPlot = histModel;
+
+            // (4) Residual vs Order
+            var rvoModel = new PlotModel();
+            rvoModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Run order" });
+            rvoModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Std residual" });
+            var rvoLine = new LineSeries
+            {
+                Color = JmpPalette[0],
+                StrokeThickness = 1.2,
+                MarkerType = MarkerType.Circle,
+                MarkerSize = 2.5,
+                MarkerFill = JmpPalette[0]
+            };
+            for (int i = 0; i < diag.ResidualsVsOrder.Order.Count; i++)
+                rvoLine.Points.Add(new DataPoint(diag.ResidualsVsOrder.Order[i], diag.ResidualsVsOrder.Residuals[i]));
+            rvoModel.Series.Add(rvoLine);
+            if (diag.ResidualsVsOrder.Order.Count > 0)
+            {
+                var zeroLine = JmpRefLine();
+                zeroLine.Points.Add(new DataPoint(1, 0));
+                zeroLine.Points.Add(new DataPoint(diag.ResidualsVsOrder.Order.Max(), 0));
+                rvoModel.Series.Add(zeroLine);
+            }
+            ApplyJmpStyle(rvoModel);
+            ResidVsOrderPlot = rvoModel;
+        }
         private async Task RestoreFullModelAsync()
         {
             foreach (var t in _paretoTerms) t.IsIncluded = true;
@@ -3387,8 +3564,20 @@ namespace MaxChemical.Modules.DOE.ViewModels
 
                 var wrapper = JsonConvert.DeserializeObject<ParetoResult>(json);
                 var data = wrapper?.Effects;
-                _paretoLogWorthCrit = wrapper?.LogWorthCrit ?? 1.301;
                 _paretoAlpha = wrapper?.Alpha ?? 0.05;
+
+                var measure = wrapper?.Measure ?? "LogWorth";
+                if (measure == "StandardizedEffect")
+                {
+                    _paretoLogWorthCrit = wrapper?.TCrit ?? wrapper?.LogWorthCrit ?? 4.3;
+                    ParetoSubtitle = $"标准化效应的 Pareto 图 (响应为 产率, α = {_paretoAlpha:F2})";
+                }
+                else
+                {
+                    _paretoLogWorthCrit = wrapper?.LogWorthCrit ?? 1.301;
+                    ParetoSubtitle = "Pareto of LogWorth = −log₁₀(p-value). Click bars to toggle include/exclude.";
+                }
+
                 if (data == null || data.Count == 0) return;
 
                 _paretoTerms = data.Select(d => new ParetoTermItem
@@ -3961,6 +4150,11 @@ namespace MaxChemical.Modules.DOE.ViewModels
                                     _currentOlsModelType = mt.ToString()!;
                             }
                             catch { }
+                        }
+                        // ★ v17: 全因子设计自动使用 interaction 模型
+                        if (_currentOlsModelType == "quadratic" && batch.DesignMethod == DOEDesignMethod.FullFactorial)
+                        {
+                            _currentOlsModelType = "interaction";
                         }
                         // 执行 OLS 分析
                         await RefreshOlsAnalysisAsync();
@@ -4868,6 +5062,8 @@ namespace MaxChemical.Modules.DOE.ViewModels
             [JsonProperty("log_worth_crit")] public double LogWorthCrit { get; set; } = 1.301;
             [JsonProperty("alpha")] public double Alpha { get; set; } = 0.05;
             [JsonProperty("measure")] public string Measure { get; set; } = "LogWorth";
+            [JsonProperty("t_crit")] public double? TCrit { get; set; }  // ★ v17
+            [JsonProperty("df_error")] public int DfError { get; set; }  // ★ v17
         }
         private class ResidVsFittedData
         {
@@ -5010,6 +5206,7 @@ namespace MaxChemical.Modules.DOE.ViewModels
             public double TValue { get; set; }
             public double PValue { get; set; }
             public double? VIF { get; set; }
+            public double? Effect { get; set; }      // ★ v17 新增
             /// <summary>p &lt; 0.05 标红</summary>
             public bool IsSignificant => PValue < 0.05;
         }

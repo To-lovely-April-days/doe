@@ -55,3 +55,4 @@ D:\Project\智能连续流\MaxChemical\MaxChemical.Modules.DOE\obj\Debug\net8.0-
 D:\Project\智能连续流\MaxChemical\MaxChemical.Modules.DOE\obj\Debug\net8.0-windows\Views\DOEProjectDetailDialog.baml
 D:\Project\智能连续流\MaxChemical\MaxChemical.Modules.DOE\obj\Debug\net8.0-windows\Views\DOEProjectDetailDialog.g.cs
 D:\Project\智能连续流\MaxChemical\MaxChemical.Modules.DOE\obj\Debug\net8.0-windows\Views\DOEWizardStyles.baml
+D:\Project\智能连续流\MaxChemical\MaxChemical.Modules.DOE\obj\Debug\net8.0-windows\MaxChemical.Modules.DOE.sourcelink.json
